@@ -19,8 +19,8 @@ OUTCOME_ANCHOR = "ac-outcome"  # ui/verdict.py links here
 CAUSES = (("weather", "Weather", "var(--accent)"), ("late_aircraft", "Late aircraft", "var(--ground)"),
           ("air_system", "Air system", "var(--pilot)"), ("airline", "Airline", "var(--solver)"),
           ("security", "Security", "var(--bad)"))
-BREAKDOWN = (("throughput", "var(--atc)"), ("connections", "var(--pilot)"),
-             ("fuel", "var(--bad)"), ("turnaround", "var(--ground)"))
+BREAKDOWN = (("delay", "var(--accent)"), ("throughput", "var(--atc)"), ("connections", "var(--pilot)"),
+             ("fuel", "var(--bad)"), ("turnaround", "var(--ground)"))  # policy-0.2 keys
 LOCK = "🔒"
 
 

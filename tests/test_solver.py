@@ -102,8 +102,9 @@ def test_hard_filter_reasons() -> None:
 def test_scoring_matches_formula() -> None:
     r = solve(packets(), TI, [], set())
     c = next(c for c in r.all if (c.package.slot, c.package.gate) == ("12:40", "A7"))
-    # demand 2 -> 1-(1/3); arrive 770 vs 760 -> 1-10/30; fuel (790-760)/45; overtime 0, assigned gate
-    exp = {"throughput": 2 / 3, "connections": 2 / 3, "fuel": 30 / 45, "turnaround": 1.0}
+    # demand 2 -> 1-(1/3); arrive 770 vs 760 -> 1-10/30; fuel (790-760)/45; overtime 0, assigned gate;
+    # no eta declared (no `eta` fact, no P_S2 target) -> delay is neutral 1.0 (policy-0.2)
+    exp = {"delay": 1.0, "throughput": 2 / 3, "connections": 2 / 3, "fuel": 30 / 45, "turnaround": 1.0}
     for k, u in exp.items():
         assert abs(c.package.score_breakdown[k] - POLICY[k] * u) < 1e-3
     assert abs(c.package.score - sum(POLICY[k] * u for k, u in exp.items())) < 1e-3
@@ -398,3 +399,37 @@ def test_slot_exactly_at_land_by_is_feasible() -> None:
     r = solve(packets(pilot=pilot(760, 760)), TI, [], set())
     assert ReasonCode.FUEL_LIMIT not in _cand(r, 760, "A12").discard
     assert ReasonCode.FUEL_LIMIT in _cand(r, 772, "A12").discard
+
+
+# --- policy-0.2 delay utility ------------------------------------------------------------------
+def test_policy_weights_sum_to_one_and_include_delay() -> None:
+    assert abs(sum(POLICY.values()) - 1.0) < 1e-9
+    assert set(POLICY) == {"delay", "connections", "throughput", "turnaround", "fuel"}
+
+
+def test_delay_utility_rewards_earlier_gate_arrival_vs_declared_eta() -> None:
+    # eta 12:10 (730), land_by 13:10 (790): span 60; gate arrival vs eta + taxi-in
+    pil = _with_facts(pilot(790, 900), eta=to_hhmm(730))
+    p = packets(pilot=pil, ground=ground({"A12": 700}, duty=900, shift_end=900))
+    r = solve(p, TI, [], set())
+    for slot, util in ((740, 1 - 10 / 60), (760, 1 - 30 / 60), (772, 1 - 42 / 60)):
+        assert abs(_cand(r, slot, "A12").package.score_breakdown["delay"] - POLICY["delay"] * util) < 1e-6
+
+
+def test_delay_utility_clamps_and_uses_p_s2_target_without_eta_fact() -> None:
+    # no eta fact: E comes from the P_S2 target (like fuel); a slot at E scores 1, past land_by 0
+    p = packets(pilot=pilot(790, 900, eta=740), ground=ground({"A12": 700}, duty=900, shift_end=900))
+    r = solve(p, TI, [], set())
+    assert _cand(r, 740, "A12").package.score_breakdown["delay"] == POLICY["delay"]
+    late = packets(pilot=pilot(765, 900, eta=740), ground=ground({"A12": 700}, duty=900, shift_end=900))
+    assert _cand(solve(late, TI, [], set()), 772, "A12").package.score_breakdown["delay"] == 0.0
+
+
+def test_earlier_contested_slot_beats_later_quiet_slot() -> None:
+    # policy-0.1 ranked the quiet 12:52 slot (demand 1) first; policy-0.2 prefers the 12:20 slot that
+    # puts the aircraft at the gate 32 min earlier, connections equal (target 13:20 met by both)
+    pil = _with_facts(pilot(790, 800), eta=to_hhmm(735))
+    p = packets(atc=atc({740: 3, 772: 1}), pilot=pil, ground=ground({"A12": 700}, duty=900, shift_end=900))
+    r = solve(p, TI, [], set())
+    assert r.top is not None and r.top.slot == to_hhmm(740)
+    assert {k for k in r.top.score_breakdown} == set(POLICY) | {"overtime_cost_min"}

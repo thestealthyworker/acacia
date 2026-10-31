@@ -159,6 +159,7 @@ def test_factory_unknown_mode() -> None:
 def test_factory_missing_llm_module_is_clear(monkeypatch) -> None:
     import sys
 
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")  # get past the no-key check to the import
     monkeypatch.setitem(sys.modules, "acacia.agents.llm", None)
     monkeypatch.setitem(sys.modules, "acacia.agents.replay", None)
     for mode in ("llm", "replay"):
