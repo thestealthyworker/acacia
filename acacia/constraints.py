@@ -43,6 +43,10 @@ GROUND_SHIFT_MIN = 8 * 60                # CREW-2
 OVERTIME_COST_FACTOR = 1.5               # CREW-2
 GROUND_MAX_OVERTIME_MIN = 45             # CREW-3
 GROUND_OVERTIME_RED_LINE_MIN = 20        # CREW-3
+# KIT-6: tight_crew stress sets shift_end = first offered slot + Ti + min_turn - this, so the
+# earliest offered slot carries exactly this much crew overtime: over the red line (G_S1 reject),
+# within the hard limit (no G_H2 discard).
+TIGHT_CREW_SLACK_MIN = 25
 GATE_CHANGE_NOTICE_MIN = 20              # GATE-1
 DEFAULT_DECISION_LEAD_MIN = 30           # GATE-1: decision time = E - 30 when nothing injected
 
@@ -270,4 +274,10 @@ REGISTRY: tuple[ConstraintItem, ...] = (
     ConstraintItem("KIT-5", "kit", "ATC arrival queue before the first slot", "not stated",
                    "round(0.6 x WEATHER_DELAY) min when WEATHER_DELAY > 15, else seeded 3-8 min",
                    "ASSUMED", "long weather delays push the first slot past land_by, so they divert"),
+    ConstraintItem("KIT-6", "kit", "Tight-crew stress shift end", "kit: first + Ti + min_turn - 6",
+                   f"first offered slot + Ti + min_turn - {TIGHT_CREW_SLACK_MIN} "
+                   f"({TIGHT_CREW_SLACK_MIN} min overtime at the earliest slot: over the "
+                   f"{GROUND_OVERTIME_RED_LINE_MIN} min red line, within the {GROUND_MAX_OVERTIME_MIN} min hard limit)",
+                   "ASSUMED", "demo stress lever for scenario D; the kit's 6 min gave about 7 min overtime, "
+                   "under the red line, and drifted when the first slot moved"),
 )

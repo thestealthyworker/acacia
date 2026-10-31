@@ -8,6 +8,9 @@ only from `acacia.constraints`.
 
 Draw order (fixed, so runs repeat): queue rand(3..8); demand rand(0..1) per free slot; pax;
 connect_by rand(28..55); assigned gate choice; shift rand(25..85); next_departure rand(20..60).
+Under tight_crew the drawn shift is replaced by first offered slot + Ti + min_turn -
+constraints.TIGHT_CREW_SLACK_MIN (KIT-6), so overtime at the earliest slot sits between the
+20 min red line and the 45 min hard duty limit.
 Every draw is always made, even when a weather queue or a stress flag overrides it, so a
 stress flag changes only the value it targets. land_by is no longer drawn: it is
 E + 45 + contingency (CONSTRAINTS.md 4).
@@ -38,7 +41,6 @@ LOW_FUEL_MARGIN = 3
 HUB_PAX_RANGE = (24, 60)
 OTHER_PAX_RANGE = (6, 30)
 CONNECT_BY_RANGE = (28, 55)
-TIGHT_CREW_SLACK = 6
 SHIFT_RANGE = (25, 85)
 NEXT_DEPARTURE_RANGE = (20, 60)
 
@@ -127,7 +129,7 @@ def _pick_gates(world: AirportWorld, assigned: str, free_from: dict[str, int | N
     return [assigned, *others[:max(0, spare)]]
 
 
-def _ground(event: DisruptionEvent, stress: Stress, first: int, world: AirportWorld,
+def _ground(event: DisruptionEvent, stress: Stress, first_slot: int, world: AirportWorld,
             view: LedgerView, rng: random.Random, last_slot: int | None = None) -> GroundPrivate:
     eta, ti = to_min(event.eta_landing), event.taxi_in
     gate_arrival = eta + ti
@@ -140,7 +142,10 @@ def _ground(event: DisruptionEvent, stress: Stress, first: int, world: AirportWo
     free_all = {g: world.gate_free_from(g, gate_arrival, view, duration=span) for g in world.gates()}
     gates = _pick_gates(world, assigned, free_all, limits.spare_gates)
     shift_drawn = gate_arrival + turn + rng.randint(*SHIFT_RANGE)
-    shift_end = first + ti + turn - TIGHT_CREW_SLACK if stress.tight_crew else shift_drawn
+    # KIT-6: anchored on the first offered slot, so the earliest slot carries exactly
+    # TIGHT_CREW_SLACK_MIN of overtime however far the runway pushes that slot past `first`.
+    tight_end = first_slot + ti + turn - constraints.TIGHT_CREW_SLACK_MIN
+    shift_end = tight_end if stress.tight_crew else shift_drawn
     next_departure = to_min(event.sched_arrival) + turn + rng.randint(*NEXT_DEPARTURE_RANGE)
     return GroundPrivate(
         gates=gates, assigned_gate=assigned, free_from={g: free_all[g] for g in gates},
@@ -159,7 +164,8 @@ def build_private(event: DisruptionEvent, stress: Stress | None, world: AirportW
     rng = private_rng(event)
     atc = _atc(event, world, ledger_view, rng)
     pilot = _pilot(event, stress, atc.first, rng)
-    ground = _ground(event, stress, atc.first, world, ledger_view, rng,
+    first_slot = min(atc.free_slots, default=atc.first)  # no slot left: anchor on the queue end
+    ground = _ground(event, stress, first_slot, world, ledger_view, rng,
                      last_slot=max(atc.free_slots, default=None))
     return PrivateState(atc=atc, pilot=pilot, ground=ground)
 
