@@ -105,6 +105,7 @@ class DisruptionEvent(BaseModel):
     overrides: list[str] = Field(default_factory=list)  # ADDED: fields set by the payload
     air_time: int | None = None  # ADDED: CONSTRAINTS.md 4, contingency fuel
     decision_time: HHMM | None = None  # ADDED: CONSTRAINTS.md 3, gate-change notice reference
+    scheduled_time: int | None = None  # ADDED: SCHEDULED_TIME block minutes (contingency, crew duty)
 
 
 # --- negotiation contracts ---------------------------------------------------------------------
@@ -359,6 +360,7 @@ class PilotPrivate(BaseModel):
     pax: int
     connect_by: int
     low_fuel: bool = False
+    crew_duty_end: int | None = None  # ADDED: CONSTRAINTS.md 4 flight-crew 13 h duty end (P_H2)
 
 
 class GroundPrivate(BaseModel):

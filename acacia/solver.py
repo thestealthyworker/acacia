@@ -16,10 +16,10 @@ from acacia.config import POLICY
 from acacia.models import (
     HHMM, AgentRole, ConstraintPacket, Decision, ReasonCode, ResolutionPackage, Stress, Verdict,
 )
-from acacia.timeutil import to_hhmm, to_min
+from acacia.timeutil import is_hhmm, to_hhmm, to_min
 
-SOLVER_VERSION = "solver-0.1"
-FUEL_SPAN_MIN = 45
+SOLVER_VERSION = "solver-0.2"
+FUEL_SPAN_MIN = 45  # used when the Pilot declares no earliest landing (P_S2 target)
 CONNECTION_SPAN_MIN = 30
 OVERTIME_SPAN_MIN = 60
 OTHER_GATE_UTILITY = 0.6
@@ -70,6 +70,8 @@ class _Decl:
     land_by: int | None
     gate_free: dict[str, int | None]  # None = unavailable
     duty_limit: int | None
+    crew_duty_end: int | None  # P_H2 FLIGHT_CREW_DUTY_END (gate arrival must not be later)
+    notice: tuple[int, int, str] | None  # G_H3 (min notice, decision time, assigned gate)
     min_turn: int
     prefs: dict[str, tuple[str, str, object]]  # id -> (metric, owner role value, target)
     traffic: tuple[int, ...]
@@ -91,6 +93,7 @@ def _parse(packets: dict[AgentRole, ConstraintPacket]) -> _Decl:
     any_packet = next(iter(packets.values()), None)
     land_by, duty = _hard(pil, "LAND_BY"), _hard(gr, "CREW_DUTY_LIMIT")
     free_raw = _hard(gr, "GATE_FREE_FROM") or {}
+    crew_end = _hard(pil, "FLIGHT_CREW_DUTY_END")
     prefs = {s.id: (s.metric, p.agent.value, s.target) for p in packets.values() for s in p.soft}
     return _Decl(
         event_id=any_packet.event_id if any_packet else "",
@@ -99,10 +102,26 @@ def _parse(packets: dict[AgentRole, ConstraintPacket]) -> _Decl:
         land_by=to_min(land_by) if isinstance(land_by, str) else None,
         gate_free={g: (None if v == "unavailable" else to_min(v)) for g, v in dict(free_raw).items()},
         duty_limit=to_min(duty) if isinstance(duty, str) else None,
+        crew_duty_end=to_min(crew_end) if isinstance(crew_end, str) else None,
+        notice=_notice(_hard(gr, "GATE_CHANGE_NOTICE")),
         min_turn=int((gr.facts_owned if gr else {}).get("min_turn_min", 0)),
         prefs=prefs,
         traffic=tuple(to_min(t) for t in (atc.facts_owned if atc else {}).get("traffic", [])),
     )
+
+
+def _notice(value: object) -> tuple[int, int, str] | None:
+    """Parse a declared G_H3 value; None when it is missing or malformed."""
+    if not isinstance(value, dict):
+        return None
+    decided, gate = value.get("decision_time"), value.get("assigned_gate")
+    try:
+        need = int(value.get("min_notice_min"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not is_hhmm(decided) or not isinstance(gate, str):
+        return None
+    return need, to_min(decided), gate
 
 
 # --- steps 2 and 3: hard filter and utilities -------------------------------------------------
@@ -115,8 +134,13 @@ def _discard(d: _Decl, slot: int, gate: str, taxi_in: int) -> list[ReasonCode]:
         free = d.gate_free[gate]
         if free is None or gate_arr < free:
             why.append(ReasonCode.GATE_CONFLICT)
-    if d.duty_limit is not None and gate_arr + d.min_turn > d.duty_limit:
+    crew_late = d.crew_duty_end is not None and gate_arr > d.crew_duty_end
+    if crew_late or (d.duty_limit is not None and gate_arr + d.min_turn > d.duty_limit):
         why.append(ReasonCode.CREW_DUTY)
+    if d.notice is not None:
+        need, decided, assigned = d.notice
+        if gate != assigned and gate_arr - decided < need:
+            why.append(ReasonCode.GATE_CHANGE_NOTICE)
     return why
 
 
@@ -133,7 +157,9 @@ def _utility(d: _Decl, metric: str, target: object, slot: int, demand: int, gate
     if metric == "fuel_margin":
         if d.land_by is None:
             return NO_PREF_UTILITY
-        return min(1.0, max(0.0, (d.land_by - slot) / FUEL_SPAN_MIN))
+        eta = to_min(target) if is_hhmm(target) else None
+        span = d.land_by - eta if eta is not None and eta < d.land_by else FUEL_SPAN_MIN
+        return min(1.0, max(0.0, (d.land_by - slot) / span))
     if metric == "turnaround_done_by":
         tgt = to_min(target) if isinstance(target, str) else None
         overtime = 0 if tgt is None else max(0, gate_arr + d.min_turn - tgt)
@@ -178,7 +204,8 @@ def _cut_hit(cut: Cut, slot: int, gate: str, utils: dict[str, float]) -> bool:
     return cut.slot is not None and slot == to_min(cut.slot) and gate == cut.gate
 
 
-_HARD_CUT_KIND = {"A_H1": "SLOT", "G_H1": "GATE", "P_H1": "SLOT_FROM", "G_H2": "SLOT_FROM"}
+_HARD_CUT_KIND = {"A_H1": "SLOT", "G_H1": "GATE", "P_H1": "SLOT_FROM", "G_H2": "SLOT_FROM",
+                  "P_H2": "SLOT_FROM"}  # G_H3 and other hard ids cut the exact package
 
 
 def cut_from_reject(decision: Decision, package: ResolutionPackage,

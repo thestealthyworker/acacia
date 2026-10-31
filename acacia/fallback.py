@@ -9,6 +9,10 @@
    full turnaround [gate arrival, gate arrival + min_turn) (PLAN 2.A.1). When a ledger view is
    given, the remote stand is the first REMOTE-k (k = 1..REMOTE_STANDS) not booked for that
    interval, so two fallback plans never share one stand.
+4. Gate-change notice (CONSTRAINTS.md 3, HARD): a gate other than the assigned one, remote
+   stands included, needs gate arrival - decision time >= 20 min. When the earliest slot has
+   no gate that meets it, the next ATC free slot (still <= land_by) is tried; if none does,
+   the earliest slot is kept and the reason says so (the checker then fails the plan).
 
 The coordinator runs the checker on a non-divert plan; this module never imports it.
 """
@@ -21,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from acacia import constraints
 from acacia.models import DisruptionEvent, EmptyLedgerView, FallbackPlan, LedgerView, PrivateState
 from acacia.timeutil import to_hhmm
 
@@ -86,12 +91,19 @@ def _fits(world: AirportWorld | None, view: LedgerView, gate: str, start: int, m
         return False
 
 
+def _notice_ok(event: DisruptionEvent, gate_arr: int) -> bool:
+    return gate_arr - constraints.decision_time_min(event) >= constraints.GATE_CHANGE_NOTICE_MIN
+
+
 def _pick_gate(event: DisruptionEvent, private: PrivateState, gate_arr: int,
-               world: AirportWorld | None, view: LedgerView) -> str | None:
-    """The earliest-free usable gate clear for the turnaround, or None."""
+               world: AirportWorld | None, view: LedgerView, changes_ok: bool = True) -> str | None:
+    """The earliest-free usable gate clear for the turnaround, or None.
+
+    With changes_ok False (gate-change notice too short) only the assigned gate qualifies."""
     g = private.ground
     usable = sorted((g.free_from[x], i, x) for i, x in enumerate(g.gates)
-                    if x not in g.failed and g.free_from.get(x) is not None)
+                    if x not in g.failed and g.free_from.get(x) is not None
+                    and (changes_ok or x == g.assigned_gate))
     for free, _, gate in usable:
         if free <= gate_arr and _fits(world, view, gate, gate_arr, g.min_turn):  # type: ignore[operator]
             return gate
@@ -133,12 +145,35 @@ def plan_fallback(event: DisruptionEvent, private: PrivateState, airports_df: pd
     if slot > land_by:
         return _divert(event, airports_df,
                        f"Earliest slot {to_hhmm(slot)} is past the fuel limit {to_hhmm(land_by)}.")
-    gate_arr = slot + event.taxi_in
     view = ledger_view if ledger_view is not None else EmptyLedgerView()
-    gate = _pick_gate(event, private, gate_arr, world, view)
-    remote = gate is None
-    if remote:
-        gate = _pick_remote(event, gate_arr, private.ground.min_turn, ledger_view)
+    for candidate in (s for s in slots if s <= land_by):
+        picked = _gate_for_slot(event, private, candidate, world, view, ledger_view)
+        if picked is not None:
+            gate, remote = picked
+            later = "" if candidate == slot else (
+                f" Slot {to_hhmm(candidate)} instead of {to_hhmm(slot)} to meet the "
+                f"{constraints.GATE_CHANGE_NOTICE_MIN} min gate-change notice.")
+            return FallbackPlan(event_id=event.event_id, slot=to_hhmm(candidate), gate=gate,
+                                reason="First-come-first-served slot, earliest free gate"
+                                       + (" (none free, remote stand)." if remote else ".") + later)
+    gate_arr = slot + event.taxi_in
+    gate = _pick_gate(event, private, gate_arr, world, view) or _pick_remote(
+        event, gate_arr, private.ground.min_turn, ledger_view)
     return FallbackPlan(event_id=event.event_id, slot=to_hhmm(slot), gate=gate,
-                        reason="First-come-first-served slot, earliest free gate"
-                               + (" (none free, remote stand)." if remote else "."))
+                        reason=f"First-come-first-served slot; no gate meets the "
+                               f"{constraints.GATE_CHANGE_NOTICE_MIN} min gate-change notice "
+                               "before the fuel limit.")
+
+
+def _gate_for_slot(event: DisruptionEvent, private: PrivateState, slot: int,
+                   world: AirportWorld | None, view: LedgerView,
+                   ledger_view: LedgerView | None) -> tuple[str, bool] | None:
+    """(gate, is_remote) for this slot honouring the gate-change notice, or None."""
+    gate_arr = slot + event.taxi_in
+    changes_ok = _notice_ok(event, gate_arr)
+    gate = _pick_gate(event, private, gate_arr, world, view, changes_ok)
+    if gate is not None:
+        return gate, False
+    if not changes_ok:
+        return None
+    return _pick_remote(event, gate_arr, private.ground.min_turn, ledger_view), True

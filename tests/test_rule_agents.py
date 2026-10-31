@@ -6,6 +6,7 @@ import pytest
 
 from acacia.agents import AgentModeUnavailable, make_agents
 from acacia.agents.base import Agent, AgentTimeout, private_for
+from acacia.agents.declared import wake_value
 from acacia.agents.rule import RuleATC, RuleGround, RulePilot
 from acacia.models import (
     AgentRole, AtcPrivate, ConstraintPacket, DisruptionEvent, GroundPrivate, PilotPrivate,
@@ -40,7 +41,7 @@ def test_atc_declares_slots_separation_and_demand(event) -> None:
     hard = {h.id: h for h in k.hard}
     assert hard["A_H1"].rule == "SLOT_IN_SEQUENCE"
     assert hard["A_H1"].value == ["12:20", "12:28", "12:40", "12:52"]
-    assert hard["A_H2"].rule == "MIN_SEPARATION_MIN" and hard["A_H2"].value == 3
+    assert hard["A_H2"].rule == "WAKE_SEPARATION" and hard["A_H2"].value == wake_value("Large")
     assert [(s.id, s.metric, s.weight) for s in k.soft] == [("A_S1", "slot_demand", 0.7)]
     assert [(o.type, o.value, o.demand) for o in k.options][:2] == [("SLOT", "12:20", 4), ("SLOT", "12:28", 3)]
     assert "12:24" in k.facts_owned["traffic"] or "12:16" in k.facts_owned["traffic"]
@@ -167,3 +168,41 @@ def test_factory_missing_llm_module_is_clear(monkeypatch) -> None:
 
 def test_agent_timeout_is_exception() -> None:
     assert issubclass(AgentTimeout, Exception)
+
+
+# --- CONSTRAINTS.md hard limits: P_H2 crew duty, G_H3 gate-change notice -------------------------
+def test_rule_and_llm_declarations_match_the_audit(event) -> None:
+    from acacia.agents.llm import audit_declaration
+
+    pilot = PILOT.model_copy(update={"crew_duty_end": 1000})
+    for role, agent, private in ((AgentRole.ATC, RuleATC(), ATC), (AgentRole.PILOT, RulePilot(), pilot),
+                                 (AgentRole.GROUND, RuleGround(), GROUND)):
+        assert audit_declaration(role, agent.declare(event, private), private, event) == []
+
+
+def test_pilot_declares_crew_duty_end_only_inside_the_day(event) -> None:
+    inside = RulePilot().declare(event, PILOT.model_copy(update={"crew_duty_end": 800}))
+    assert ("P_H2", "FLIGHT_CREW_DUTY_END", "13:20") in [(h.id, h.rule, h.value) for h in inside.hard]
+    later = RulePilot().declare(event, PILOT.model_copy(update={"crew_duty_end": 1500}))
+    assert [h.id for h in later.hard] == ["P_H1"]
+
+
+def test_pilot_rejects_past_crew_duty_end(event) -> None:
+    pilot = PILOT.model_copy(update={"crew_duty_end": 760, "connect_by": 800})
+    assert _decide(RulePilot(), event, pilot, 750, "A7")[0].verdict == Verdict.ACCEPT  # arrive 760
+    d, packet = _decide(RulePilot(), event, pilot, 751, "A7")
+    assert d.reason_code == ReasonCode.CREW_DUTY and d.cites == "P_H2" and d.cites in packet.ids()
+
+
+def test_ground_declares_and_enforces_gate_change_notice(event) -> None:
+    late = event.model_copy(update={"decision_time": "12:30"})  # decided 750
+    k = RuleGround().declare(late, GROUND)
+    g_h3 = next(h for h in k.hard if h.id == "G_H3")
+    assert g_h3.rule == "GATE_CHANGE_NOTICE"
+    assert g_h3.value == {"min_notice_min": 20, "decision_time": "12:30", "assigned_gate": "A7"}
+    assert _decide(RuleGround(), late, GROUND, 760, "A12")[0].verdict == Verdict.ACCEPT  # 770-750 = 20
+    d, packet = _decide(RuleGround(), late, GROUND, 759, "A12")  # 19 min notice
+    assert d.reason_code == ReasonCode.GATE_CHANGE_NOTICE and d.cites == "G_H3" and d.cites in packet.ids()
+    d, _ = _decide(RuleGround(), late, GROUND, 740, "REMOTE-1")
+    assert d.reason_code == ReasonCode.GATE_CHANGE_NOTICE
+    assert _decide(RuleGround(), late, GROUND, 755, "A7")[0].verdict == Verdict.ACCEPT  # assigned gate

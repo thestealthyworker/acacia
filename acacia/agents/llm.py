@@ -4,7 +4,7 @@ Each agent has its own system prompt (prompts/{role}.md) and sees only the share
 private state and, when deciding, the package plus its own packet. Output is validated with
 Pydantic; one retry carries the validation error; a second failure, an API timeout or an API error
 raises AgentTimeout (the coordinator then applies the most restrictive default, HANDOVER 11.3).
-The declaration audit compares declared hard limits with private state and never corrects them.
+The declaration audit compares declared hard limits (CONSTRAINTS.md) with private state, uncorrected.
 """
 
 from __future__ import annotations
@@ -22,6 +22,9 @@ from pydantic import BaseModel, ValidationError
 
 from acacia import config
 from acacia.agents.base import AgentPrivate, AgentTimeout, coerce_private
+from acacia.agents.declared import (  # noqa: F401  (re-exported for callers and tests)
+    WAKE_CLASSES, crew_duty_hhmm, decision_time_min, gate_notice_value, wake_value,
+)
 from acacia.models import (
     AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, PilotPrivate,
     ResolutionPackage,
@@ -81,7 +84,7 @@ def tool_spec(step: Step) -> dict:
     return {"name": name, "description": description, "input_schema": model.model_json_schema()}
 
 
-def private_view(role: AgentRole, private: AgentPrivate | dict) -> dict:
+def private_view(role: AgentRole, private: AgentPrivate | dict, event: DisruptionEvent | None = None) -> dict:
     """The agent's own private state with times as "HH:MM", so it never has to convert minutes."""
     p = coerce_private(role, private)
     if isinstance(p, AtcPrivate):
@@ -89,34 +92,42 @@ def private_view(role: AgentRole, private: AgentPrivate | dict) -> dict:
         return {"first_available_slot": to_hhmm(p.first), "free_slots": [to_hhmm(s) for s in slots],
                 "slot_demand": {to_hhmm(s): p.demand.get(s, 1) for s in slots},
                 "other_traffic": [to_hhmm(t) for t in sorted(p.traffic)],
-                "runway_closures": [{"from": to_hhmm(a), "until": to_hhmm(b)} for a, b in p.closures],
-                "min_separation_min": p.min_separation}
+                "traffic_wake_classes": {to_hhmm(t): c for t, c in sorted(p.traffic_classes.items())},
+                "own_wake_class": p.own_class, "wake_separation": wake_value(p.own_class),
+                "runway_closures": [{"from": to_hhmm(a), "until": to_hhmm(b)} for a, b in p.closures]}
     if isinstance(p, PilotPrivate):
         return {"land_by": to_hhmm(p.land_by), "connecting_pax": p.pax,
-                "connect_by": to_hhmm(p.connect_by), "low_fuel": p.low_fuel}
-    return {"gates": list(p.gates), "assigned_gate": p.assigned_gate,
+                "connect_by": to_hhmm(p.connect_by), "low_fuel": p.low_fuel,
+                "crew_duty_end": crew_duty_hhmm(p)}
+    view = {"gates": list(p.gates), "assigned_gate": p.assigned_gate,
             "gate_free_from": _gate_free_map(p), "failed_gates": list(p.failed),
             "min_turn_min": p.min_turn, "shift_end": to_hhmm(p.shift_end),
             "duty_limit": to_hhmm(p.duty_limit), "next_departure": to_hhmm(p.next_departure)}
+    if event is not None:
+        view["gate_change_notice"] = gate_notice_value(event, p)
+    return view
 
 
 def _gate_free_map(g: GroundPrivate) -> dict[str, str]:
-    out = {}
-    for gate in g.gates:
-        free = g.free_from.get(gate)
-        out[gate] = "unavailable" if gate in g.failed or free is None else to_hhmm(free)
-    return out
+    return {gate: "unavailable" if gate in g.failed or g.free_from.get(gate) is None
+            else to_hhmm(g.free_from[gate]) for gate in g.gates}  # type: ignore[arg-type]
 
 
 def _derived(role: AgentRole, event: DisruptionEvent, package: ResolutionPackage,
              private: AgentPrivate | dict) -> dict:
-    """Arithmetic done by code, not the model: gate arrival and turnaround end for the package."""
-    gate_arr = to_min(package.slot) + event.taxi_in
-    if role == AgentRole.PILOT:
-        return {"gate_arrival": to_hhmm(gate_arr)}
-    if role == AgentRole.GROUND:
-        g = coerce_private(role, private)
-        return {"gate_arrival": to_hhmm(gate_arr), "turnaround_end": to_hhmm(gate_arr + g.min_turn)}
+    """Arithmetic done by code, not the model: margins, turnaround end, overtime, gate-change notice."""
+    slot = to_min(package.slot)
+    gate_arr = slot + event.taxi_in
+    p = coerce_private(role, private)
+    if isinstance(p, PilotPrivate):
+        return {"gate_arrival": to_hhmm(gate_arr), "fuel_margin_min": p.land_by - slot,
+                "crew_duty_margin_min": None if p.crew_duty_end is None else p.crew_duty_end - gate_arr}
+    if isinstance(p, GroundPrivate):
+        done = gate_arr + p.min_turn
+        change = package.gate != p.assigned_gate
+        return {"gate_arrival": to_hhmm(gate_arr), "turnaround_end": to_hhmm(done),
+                "overtime_min": max(0, done - p.shift_end), "gate_change": change,
+                "gate_change_notice_min": gate_arr - decision_time_min(event) if change else None}
     return {}
 
 
@@ -135,7 +146,7 @@ def build_user_message(role: AgentRole, step: Step, event: DisruptionEvent, priv
         ident += f', package_id "{package.package_id}"'  # type: ignore[union-attr]
     parts = [f"Step: {step}. Call the tool {tool} exactly once. Use {ident}.",
              f"Shared event (JSON):\n{_js(event.model_dump(mode='json'))}",
-             f"Your private state (simulated, yours only, times HH:MM):\n{_js(private_view(role, private))}"]
+             f"Your private state (simulated, yours only, times HH:MM):\n{_js(private_view(role, private, event))}"]
     if step == "decide":
         parts += [f"Package to vote on (JSON):\n{_js(package.model_dump(mode='json'))}",  # type: ignore[union-attr]
                   f"Your own declared packet (JSON):\n{_js(own_packet.model_dump(mode='json'))}",  # type: ignore[union-attr]
@@ -163,45 +174,58 @@ def recording_path(root: Path | str, event_id: str, role: AgentRole, step: Step,
 
 
 # --- declaration audit ---------------------------------------------------------------------------
-def _expected_limits(role: AgentRole, private: AgentPrivate | dict) -> list[tuple[str, str, str, Any]]:
-    """(kind, id, rule, expected value) per declared limit the solver relies on."""
+def expected_declaration(role: AgentRole, private: AgentPrivate | dict,
+                         event: DisruptionEvent | None = None) -> list[tuple[str, str, str, Any]]:
+    """(kind, id, rule, value) the solver and checker rely on (CONSTRAINTS.md 2-3); G_H3 needs the event."""
     p = coerce_private(role, private)
     if isinstance(p, AtcPrivate):
         return [("hard", "A_H1", "SLOT_IN_SEQUENCE", [to_hhmm(s) for s in sorted(p.free_slots)]),
-                ("hard", "A_H2", "MIN_SEPARATION_MIN", p.min_separation)]
+                ("hard", "A_H2", "WAKE_SEPARATION", wake_value(p.own_class))]
     if isinstance(p, PilotPrivate):
-        return [("hard", "P_H1", "LAND_BY", to_hhmm(p.land_by))]
-    return [("hard", "G_H1", "GATE_FREE_FROM", _gate_free_map(p)),
-            ("hard", "G_H2", "CREW_DUTY_LIMIT", to_hhmm(p.duty_limit)),
-            ("fact", "min_turn_min", "facts_owned", p.min_turn)]
+        duty = crew_duty_hhmm(p)
+        return [("hard", "P_H1", "LAND_BY", to_hhmm(p.land_by))] + (
+            [("hard", "P_H2", "FLIGHT_CREW_DUTY_END", duty)] if duty else [])
+    out = [("hard", "G_H1", "GATE_FREE_FROM", _gate_free_map(p)),
+           ("hard", "G_H2", "CREW_DUTY_LIMIT", to_hhmm(p.duty_limit))]
+    if event is not None:
+        out.append(("hard", "G_H3", "GATE_CHANGE_NOTICE", gate_notice_value(event, p)))
+    return out + [("fact", "min_turn_min", "facts_owned", p.min_turn)]
 
 
 def _same(declared: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        return (isinstance(declared, dict) and set(map(str, declared)) == set(map(str, expected))
+                and all(_same(declared.get(k), v) for k, v in expected.items()))
     if isinstance(expected, list):
         return isinstance(declared, list) and sorted(map(str, declared)) == sorted(map(str, expected))
-    if isinstance(expected, dict):
-        return (isinstance(declared, dict) and set(map(str, declared)) == set(expected)
-                and all(str(declared[k]).strip() == v for k, v in expected.items()))
-    if isinstance(expected, int):
+    if isinstance(declared, bool) or isinstance(expected, bool):
+        return declared is expected
+    if isinstance(expected, (int, float)):
         try:
-            return not isinstance(declared, bool) and int(declared) == expected and float(declared) == expected
+            return abs(float(declared) - expected) < (0.05 if isinstance(expected, float) else 1e-9)
         except (TypeError, ValueError):
             return False
     return isinstance(declared, str) and declared.strip() == expected
 
 
-def audit_declaration(role: AgentRole, packet: ConstraintPacket, private: AgentPrivate | dict) -> list[dict]:
+def audit_declaration(role: AgentRole, packet: ConstraintPacket, private: AgentPrivate | dict,
+                      event: DisruptionEvent | None = None) -> list[dict]:
     """AUDIT notes for declared hard limits that disagree with private state. Nothing is corrected."""
     role = AgentRole(role)
-    hard = {h.id: h.value for h in packet.hard}
+    hard = {h.id: h for h in packet.hard}
     notes = []
-    for kind, limit_id, rule, expected in _expected_limits(role, private):
-        source = hard if kind == "hard" else packet.facts_owned
-        present = limit_id in source
-        declared = source.get(limit_id)
-        if present and _same(declared, expected):
+    for kind, limit_id, rule, expected in expected_declaration(role, private, event):
+        if kind == "hard":
+            limit = hard.get(limit_id)
+            present, declared = limit is not None, (limit.value if limit else None)
+            rule_ok = limit is not None and limit.rule == rule
+        else:
+            present, declared, rule_ok = limit_id in packet.facts_owned, packet.facts_owned.get(limit_id), True
+        if present and rule_ok and _same(declared, expected):
             continue
         what = f"declared {_js(declared)}" if present else "not declared"
+        if present and not rule_ok:
+            what += f" under rule {hard[limit_id].rule}"
         notes.append({"agent": role.value, "id": limit_id, "rule": rule, "declared": declared,
                       "expected": expected,
                       "text": f"{role.value} {limit_id} {rule} {what}; private state says {_js(expected)} "
@@ -276,7 +300,7 @@ class LLMAgent:
         request = build_request(self.role, "declare", self.model, event, private)
         expected = {"event_id": event.event_id, "agent": self.role, "turn": event.turn}
         packet = self._run("declare", request, expected, event.event_id, event.turn)
-        self.last_audit = audit_declaration(self.role, packet, private)  # type: ignore[arg-type]
+        self.last_audit = audit_declaration(self.role, packet, private, event)  # type: ignore[arg-type]
         for note in self.last_audit:
             logger.warning("AUDIT %s", note["text"])
         return packet  # type: ignore[return-value]

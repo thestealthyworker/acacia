@@ -1,4 +1,10 @@
-"""Shared airport world (FABLE_ADDENDUM 4, HANDOVER 18.2, PLAN 2.A.1 and 2.A.2).
+"""Shared airport world (FABLE_ADDENDUM 4, HANDOVER 18.2, PLAN 2.A.1 and 2.A.2, CONSTRAINTS.md 2).
+
+The runway grid follows the workbook arrival capacity: points step 60 / R(t) minutes
+(accumulated as a float, rounded to whole minutes, duplicates dropped), where R is 50% of the
+airport's max runway movements per hour, x0.6 / x0.4 inside a moderate / severe storm window
+(a RUNWAY_CLOSED injected event). Each point carries a seeded wake class (Heavy/Large/Small
+15/80/5), drawn from its own rng so the gate draws do not depend on it.
 
 One `AirportWorld` per (airport, date, injected set): a runway grid with background traffic, a
 pool of 8 gates with background busy intervals, and equipment-failure intervals. It is built
@@ -12,15 +18,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from acacia import config
+from acacia import config, constraints
 from acacia.models import Injected, LedgerView
 from acacia.timeutil import to_min
 
 Interval = tuple[int, int]
 
-TRAFFIC_PROBABILITY = 0.55
-GRID_STEP = 4
-GRID_STEP_IN_CLOSURE = 8
+TRAFFIC_PROBABILITY = constraints.BACKGROUND_LOAD  # CAP-7
+DEFAULT_STORM = "moderate"  # CAP-8: a RUNWAY_CLOSED window without a severity
 GATE_COUNT = 8
 GATE_NUMBER_RANGE = (1, 30)
 BUSY_COUNT_RANGE = (2, 4)
@@ -28,7 +33,7 @@ BUSY_START_RANGE = (5 * 60, 22 * 60)
 BUSY_LENGTH_RANGE = (30, 70)
 SKIP_RANGE = (0, 1)
 
-_CACHE: dict[tuple[str, str, frozenset[tuple[str, str, str, str]]], "AirportWorld"] = {}
+_CACHE: dict[tuple[str, str, frozenset[tuple]], "AirportWorld"] = {}
 
 
 def merge_intervals(intervals: Iterable[Interval]) -> list[Interval]:
@@ -69,22 +74,45 @@ class AirportWorld:
         self._closures = merge_intervals(
             (to_min(i.start), to_min(i.end)) for i in self._injected if i.type == "RUNWAY_CLOSED"
         )
+        self._storms = [(to_min(i.start), to_min(i.end), i.severity or DEFAULT_STORM)
+                        for i in self._injected if i.type == "RUNWAY_CLOSED"]
         rng = config.seeded_rng(config.seed_key("world", self.airport, self.date))
         self._grid: list[int] = self._build_grid()
         self._traffic: dict[int, bool] = {p: rng.random() < TRAFFIC_PROBABILITY for p in self._grid}
+        self._classes: dict[int, str] = self._draw_classes()
         self._gates: list[str] = self._draw_gates(rng)
         self._busy: dict[str, list[Interval]] = {g: self._draw_busy(rng) for g in self._gates}
         self._failed: dict[str, list[Interval]] = {g: [] for g in self._gates}
         self._apply_failures()
 
     # --- construction ---------------------------------------------------------------------
+    def storm_at(self, t: int) -> constraints.Storm:
+        """Storm level at t: the most severe RUNWAY_CLOSED window containing t, else "none"."""
+        levels = {sev for s, e, sev in self._storms if s <= t < e}
+        return "severe" if "severe" in levels else "moderate" if levels else "none"
+
     def _build_grid(self) -> list[int]:
         grid: list[int] = []
-        point = 0
+        point = 0.0
         while point < config.MINUTES_PER_DAY:
-            grid.append(point)
-            point += GRID_STEP_IN_CLOSURE if self.closure_at(point) else GRID_STEP
+            minute = int(point + 0.5)
+            if minute < config.MINUTES_PER_DAY and (not grid or minute > grid[-1]):
+                grid.append(minute)
+            point += 60.0 / constraints.arrival_rate(self.airport, self.storm_at(minute))
         return grid
+
+    def _draw_classes(self) -> dict[int, str]:
+        rng = config.seeded_rng(config.seed_key("world-class", self.airport, self.date))
+        out: dict[int, str] = {}
+        for p in self._grid:
+            u, acc = rng.random(), 0.0
+            out[p] = constraints.TRAFFIC_CLASS_MIX[-1][0]
+            for label, share in constraints.TRAFFIC_CLASS_MIX:
+                acc += share
+                if u < acc:
+                    out[p] = label
+                    break
+        return out
 
     def _draw_gates(self, rng) -> list[str]:
         low, high = GATE_NUMBER_RANGE
@@ -122,6 +150,10 @@ class AirportWorld:
 
     def closure_at(self, t: int) -> bool:
         return _contains(self._closures, t)
+
+    def traffic_class(self, t: int) -> str:
+        """Seeded wake class of the movement at grid point t (WAKE-3); "Large" off the grid."""
+        return self._classes.get(t, "Large")
 
     def is_traffic(self, t: int) -> bool:
         return self._traffic.get(t, False)
@@ -199,7 +231,8 @@ class AirportWorld:
 
 
 def _cache_key(airport: str, date: str, injected: Iterable[Injected]):
-    return (airport.upper(), date, frozenset((i.type, i.ref, i.start, i.end) for i in injected))
+    return (airport.upper(), date,
+            frozenset((i.type, i.ref, i.start, i.end, i.severity) for i in injected))
 
 
 def get_world(airport: str, date: str, injected: Sequence[Injected]) -> AirportWorld:

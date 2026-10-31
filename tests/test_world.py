@@ -83,14 +83,44 @@ def test_get_world_caches_per_airport_date_and_injected() -> None:
 
 
 # --- runway grid -------------------------------------------------------------------------------
-def test_grid_spacing_is_4_outside_and_8_inside_closures() -> None:
+def _gaps(grid: list[int], lo: int, hi: int) -> list[int]:
+    pts = [p for p in grid if lo <= p < hi]
+    return [b - a for a, b in zip(pts, pts[1:], strict=False)]
+
+
+def test_grid_follows_workbook_arrival_capacity_and_storm_factor() -> None:
+    """CONSTRAINTS.md 2: ATL 90 movements/hr x 50% = 45 arrivals/hr (step 1.33 min), x0.6 in a
+    moderate storm (27/hr, 2.22 min), x0.4 in a severe one (18/hr, 3.33 min)."""
     world = AirportWorld("ATL", DATE, [CLOSURE])
     grid = world.grid()
     assert grid[0] == 0 and all(0 <= p < config.MINUTES_PER_DAY for p in grid)
-    for a, b in zip(grid, grid[1:], strict=False):
-        assert b - a == (8 if world.closure_at(a) else 4), (a, b)
+    assert grid == sorted(set(grid))
+    assert grid[:7] == [0, 1, 3, 4, 5, 7, 8]  # 0, 1.33, 2.67, 4, 5.33, 6.67, 8 rounded
+    assert len([p for p in grid if 600 <= p < 660]) == 45  # nominal hour
+    assert len([p for p in grid if 720 <= p < 780]) == 27  # moderate storm hour (severity None)
+    assert set(_gaps(grid, 720, 780)) <= {2, 3}
+    severe = AirportWorld("ATL", DATE, [CLOSURE.model_copy(update={"severity": "severe"})])
+    assert len([p for p in severe.grid() if 720 <= p < 780]) == 18
+    assert set(_gaps(severe.grid(), 720, 780)) <= {3, 4}
+    assert world.storm_at(720) == "moderate" and severe.storm_at(779) == "severe"
+    assert world.storm_at(780) == "none"
     assert world.closure_at(720) and world.closure_at(779) and not world.closure_at(780)
     assert world.closures() == [(720, 780)]
+
+
+def test_medium_hub_grid_uses_its_own_capacity() -> None:
+    world = AirportWorld("SFO", DATE, [])  # 60 movements/hr -> 30 arrivals/hr, step 2
+    assert set(_gaps(world.grid(), 0, 1440)) == {2}
+
+
+def test_traffic_wake_classes_are_seeded_and_near_the_mix() -> None:
+    world = AirportWorld("ATL", DATE, [])
+    again = AirportWorld("ATL", DATE, [])
+    grid = world.grid()
+    assert [world.traffic_class(p) for p in grid] == [again.traffic_class(p) for p in grid]
+    share = {c: sum(world.traffic_class(p) == c for p in grid) / len(grid) for c in ("Heavy", "Large", "Small")}
+    assert 0.11 < share["Heavy"] < 0.19 and 0.75 < share["Large"] < 0.85 and 0.02 < share["Small"] < 0.08
+    assert world.traffic_class(2) == "Large"  # not a grid point
 
 
 def test_closures_are_a_union_of_runway_closed_events() -> None:
@@ -130,7 +160,7 @@ def test_free_slots_skip_traffic_taken_and_earlier_points() -> None:
 
 def test_free_slots_after_end_of_day_is_empty() -> None:
     world = AirportWorld("ATL", DATE, [])
-    assert world.free_slots_after(1439, 4, EmptyLedgerView()) == []
+    assert world.free_slots_after(world.grid()[-1] + 1, 4, EmptyLedgerView()) == []
     assert world.free_slots_after(config.MINUTES_PER_DAY, 4, EmptyLedgerView()) == []
     assert world.free_slots_after(0, 0, EmptyLedgerView()) == []
 

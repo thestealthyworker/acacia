@@ -8,7 +8,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from acacia import config
+from acacia import config, constraints
 from acacia.data import FLIGHT_COLUMNS, DataStore
 from acacia.graph import ImpactGraph, node_id_for
 
@@ -44,8 +44,9 @@ def graph(rotation_store: DataStore) -> ImpactGraph:
 
 # --- test 15: rotation edges ---------------------------------------------------------------------
 def test_15_rotation_chain_and_slack_on_fixture(graph: ImpactGraph) -> None:
+    # CONSTRAINTS.md 3: turnaround at the connecting station (DCA 35, ATL 45, MCO 35)
     assert graph.rotation_next(L1) == (L2, 15)
-    assert graph.rotation_next(L2) == (L3, 15)
+    assert graph.rotation_next(L2) == (L3, 5)
     assert graph.rotation_next(L3) == (L4, 10)
     assert graph.rotation_next(L4) is None
     assert graph.rotation_next(C1) is None  # other tail, single leg
@@ -99,12 +100,28 @@ def test_15_tolerance_minus_30_and_broken_chain() -> None:
     assert g.rotation_next(node_id_for("DL", "1", DATE, "ATL", "DCA", 800)) is None
 
 
-def test_15_slack_uses_min_turn_by_distance() -> None:
+def test_15_slack_uses_workbook_turnaround_at_connecting_station() -> None:
+    """CONSTRAINTS.md CAP-6: min_turn = airport_limits(a.dest).min_turnaround_min, not distance."""
     a = _leg("1", "N1", "LAX", "JFK", "0800", "1600", DISTANCE="2475")
     b = _leg("2", "N1", "JFK", "LAX", "1730", "2100")
     g = ImpactGraph.build(_frame([a, b]), DATE)
     nxt = g.rotation_next(node_id_for("DL", "1", DATE, "LAX", "JFK", 800))
-    assert nxt is not None and nxt[1] == 90 - config.min_turn(2475)
+    assert nxt is not None and nxt[1] == 90 - constraints.min_turnaround("JFK") == 55
+    assert nxt[1] != 90 - config.min_turn(2475)  # the distance rule would give 30
+
+
+def test_15_slack_differs_by_station_and_unknown_airport_uses_nonhub() -> None:
+    at_atl = [_leg("1", "N1", "DCA", "ATL", "0800", "1000"), _leg("2", "N1", "ATL", "DCA", "1100", "1300")]
+    at_dca = [_leg("1", "N1", "ATL", "DCA", "0800", "1000"), _leg("2", "N1", "DCA", "ATL", "1100", "1300")]
+    at_zzz = [_leg("1", "N1", "ATL", "ZZZ", "0800", "1000"), _leg("2", "N1", "ZZZ", "ATL", "1100", "1300")]
+    slacks = []
+    for rows, dest in ((at_atl, "ATL"), (at_dca, "DCA"), (at_zzz, "ZZZ")):
+        g = ImpactGraph.build(_frame(rows), DATE)
+        nxt = g.rotation_next(node_id_for("DL", "1", DATE, rows[0]["ORIGIN_AIRPORT"], dest, 800))
+        assert nxt is not None
+        slacks.append(nxt[1])
+    assert slacks == [60 - 45, 60 - 35, 60 - constraints.airport_limits("ZZZ").min_turnaround_min]
+    assert constraints.airport_limits("ZZZ").assumed
 
 
 def test_15_at_most_one_successor_sorted_by_sched_dep_then_file_order() -> None:

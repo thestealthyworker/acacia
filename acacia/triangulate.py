@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import hashlib
 
-from acacia import config
+from acacia import config, constraints
 from acacia.data import Row, earliest_landing, num, row_date, taxi_in
 from acacia.models import Causes, DisruptionEvent, FlightRef, Injected, ScenarioType
 from acacia.timeutil import parse_hhmm, to_hhmm
 
-RUNWAY_REF = "one of two arrival runways"
+RUNWAY_REF = "storm ({level}): arrival capacity x{factor:g}"  # CONSTRAINTS.md 2
 EQUIPMENT_REF = "jet bridge out at one gate"
 
 
@@ -32,13 +32,19 @@ def _clamp_day(t: int) -> int:
 
 
 def injected_for(event_id: str, eta: int, weather: int) -> list[Injected]:
-    """RUNWAY_CLOSED when W > 15 (end seeded rand 0..10), else EQUIPMENT_FAILURE."""
+    """RUNWAY_CLOSED storm window when W > 15 (end seeded rand 0..10), else EQUIPMENT_FAILURE.
+
+    The storm keeps type RUNWAY_CLOSED and carries its severity (CONSTRAINTS.md 2)."""
+    severity = None
     if weather > config.WEATHER_THRESHOLD:
         extra = config.seeded_rng(config.seed_key(event_id, "event")).randint(0, 10)
-        start, end, kind, ref = eta - 10, eta + weather + extra, "RUNWAY_CLOSED", RUNWAY_REF
+        severity = constraints.storm_level(weather)
+        ref = RUNWAY_REF.format(level=severity, factor=constraints.STORM_FACTOR[severity])
+        start, end, kind = eta - 10, eta + weather + extra, "RUNWAY_CLOSED"
     else:
         start, end, kind, ref = eta - 20, eta + 180, "EQUIPMENT_FAILURE", EQUIPMENT_REF
-    return [Injected(type=kind, ref=ref, start=to_hhmm(_clamp_day(start)), end=to_hhmm(_clamp_day(end)))]
+    return [Injected(type=kind, ref=ref, start=to_hhmm(_clamp_day(start)), end=to_hhmm(_clamp_day(end)),
+                     severity=severity)]
 
 
 def flight_ref(row: Row) -> FlightRef:
@@ -80,4 +86,12 @@ def triangulate(row: Row) -> DisruptionEvent:
         distance=num(row, "DISTANCE"),
         causes=causes,
         injected=injected_for(event_id, eta, causes.weather),
+        air_time=_positive(row, "AIR_TIME"),
+        scheduled_time=_positive(row, "SCHEDULED_TIME"),
     )
+
+
+def _positive(row: Row, column: str) -> int | None:
+    """A positive whole-minute column value, else None (blank or zero)."""
+    value = num(row, column)
+    return value if value > 0 else None

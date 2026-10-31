@@ -30,25 +30,32 @@ def atc(slots: dict[int, int], traffic: list[int] | None = None) -> ConstraintPa
     )
 
 
-def pilot(land_by: int, connect_by: int, pax: int = 38) -> ConstraintPacket:
+def pilot(land_by: int, connect_by: int, pax: int = 38, crew_end: int | None = None,
+          eta: int | None = None) -> ConstraintPacket:
+    hard = [HardLimit(id="P_H1", rule="LAND_BY", value=to_hhmm(land_by))]
+    if crew_end is not None:
+        hard.append(HardLimit(id="P_H2", rule="FLIGHT_CREW_DUTY_END", value=to_hhmm(crew_end)))
     return ConstraintPacket(
-        event_id=EID, agent=AgentRole.PILOT, turn=1,
-        hard=[HardLimit(id="P_H1", rule="LAND_BY", value=to_hhmm(land_by))],
+        event_id=EID, agent=AgentRole.PILOT, turn=1, hard=hard,
         soft=[SoftPref(id="P_S1", preference="connections", weight=0.7, metric="gate_arrival_by",
                        target=to_hhmm(connect_by), stake=pax),
-              SoftPref(id="P_S2", preference="fuel", weight=0.3, metric="fuel_margin")],
+              SoftPref(id="P_S2", preference="fuel", weight=0.3, metric="fuel_margin",
+                       target=None if eta is None else to_hhmm(eta))],
         options=[],
     )
 
 
 def ground(free: dict[str, int | None], duty: int, shift_end: int, min_turn: int = 35,
-           assigned: str | None = None) -> ConstraintPacket:
+           assigned: str | None = None, decided: int | None = None) -> ConstraintPacket:
     gates = list(free)
+    hard = [HardLimit(id="G_H1", rule="GATE_FREE_FROM",
+                      value={g: ("unavailable" if t is None else to_hhmm(t)) for g, t in free.items()}),
+            HardLimit(id="G_H2", rule="CREW_DUTY_LIMIT", value=to_hhmm(duty))]
+    if decided is not None:
+        hard.append(HardLimit(id="G_H3", rule="GATE_CHANGE_NOTICE", value={
+            "min_notice_min": 20, "decision_time": to_hhmm(decided), "assigned_gate": assigned or gates[0]}))
     return ConstraintPacket(
-        event_id=EID, agent=AgentRole.GROUND, turn=1,
-        hard=[HardLimit(id="G_H1", rule="GATE_FREE_FROM",
-                        value={g: ("unavailable" if t is None else to_hhmm(t)) for g, t in free.items()}),
-              HardLimit(id="G_H2", rule="CREW_DUTY_LIMIT", value=to_hhmm(duty))],
+        event_id=EID, agent=AgentRole.GROUND, turn=1, hard=hard,
         soft=[SoftPref(id="G_S1", preference="no overtime", weight=0.6, metric="turnaround_done_by",
                        target=to_hhmm(shift_end)),
               SoftPref(id="G_S2", preference="keep gate", weight=0.4, metric="keep_gate",
@@ -207,16 +214,22 @@ def declared(draw):
     duty = draw(st.integers(620, 1100))
     min_turn = draw(st.sampled_from([35, 45, 60]))
     taxi = draw(st.integers(3, 25))
-    p = {AgentRole.ATC: atc(slots), AgentRole.PILOT: pilot(land_by, draw(st.integers(600, 900)))}
+    crew_end = draw(st.one_of(st.none(), st.integers(600, 1000)))
+    decided = draw(st.one_of(st.none(), st.integers(560, 900)))
+    p = {AgentRole.ATC: atc(slots),
+         AgentRole.PILOT: pilot(land_by, draw(st.integers(600, 900)), crew_end=crew_end)}
     if gates:
-        p[AgentRole.GROUND] = ground(gates, duty, draw(st.integers(600, 1000)), min_turn)
-    return p, taxi, land_by, duty, min_turn, gates
+        p[AgentRole.GROUND] = ground(gates, duty, draw(st.integers(600, 1000)), min_turn,
+                                     decided=decided)
+    limits = {"crew_end": crew_end, "decided": decided if gates else None,
+              "assigned": next(iter(gates), None)}
+    return p, taxi, land_by, duty, min_turn, gates, limits
 
 
 @settings(max_examples=300, deadline=None, derandomize=True)
 @given(declared())
 def test_solver_never_breaks_declared_hard_limit(data) -> None:
-    p, taxi, land_by, duty, min_turn, gates = data
+    p, taxi, land_by, duty, min_turn, gates, limits = data
     r = solve(p, taxi, [], set())
     for c in _feasible(r) + ([] if r.top is None else [next(x for x in r.all if x.package == r.top)]):
         slot = to_min(c.package.slot)
@@ -226,6 +239,10 @@ def test_solver_never_breaks_declared_hard_limit(data) -> None:
         if free is not None:
             assert slot + taxi >= free
         assert slot + taxi + min_turn <= duty
+        if limits["crew_end"] is not None:
+            assert slot + taxi <= limits["crew_end"]
+        if limits["decided"] is not None and c.package.gate != limits["assigned"]:
+            assert slot + taxi - limits["decided"] >= 20
         assert c.package.satisfies_hard
 
 
@@ -287,3 +304,38 @@ def test_rule_agent_packets_feed_the_solver(dl1639_row) -> None:
             assert d.verdict == Verdict.ACCEPT or d.cites not in {"A_H1", "P_H1", "G_H1", "G_H2"}
     bad = solve(p, event.taxi_in, [], set(), stress=Stress(corrupt_solver=True))
     assert bad.corrupted and bad.top.satisfies_hard
+
+
+# --- CONSTRAINTS.md hard limits declared by the agents ----------------------------------------
+def _cand(r: SolveResult, slot: int, gate: str):
+    return next(c for c in r.all if c.package.slot == to_hhmm(slot) and c.package.gate == gate)
+
+
+def test_gate_change_notice_discards_late_gate_changes() -> None:
+    # decided 12:30 (750): A12 at slot 760 -> arrive 770, 20 min notice passes; 748 -> 758 fails
+    g = ground({"A7": 700, "A12": 700}, 900, 900, assigned="A7", decided=750)
+    r = solve(packets(ground=g), TI, [], set())
+    assert ReasonCode.GATE_CHANGE_NOTICE in _cand(r, 748, "A12").discard
+    assert _cand(r, 760, "A12").discard == []
+    assert _cand(r, 748, "A7").discard == []  # the assigned gate needs no notice
+
+
+def test_flight_crew_duty_end_discards_late_gate_arrival() -> None:
+    r = solve(packets(pilot=pilot(790, 760, crew_end=758)), TI, [], set())
+    assert _cand(r, 748, "A12").discard == []  # arrive 758 == crew end
+    assert ReasonCode.CREW_DUTY in _cand(r, 760, "A12").discard
+
+
+def test_crew_duty_cite_cuts_slot_and_later() -> None:
+    p = packets(pilot=pilot(790, 760, crew_end=900))
+    top = solve(p, TI, [], set()).top
+    cut = cut_from_reject(_reject(AgentRole.PILOT, ReasonCode.CREW_DUTY, "P_H2", top.package_id), top, p, TI)
+    assert cut is not None and cut.kind == "SLOT_FROM" and cut.slot == top.slot
+
+
+def test_fuel_utility_spans_land_by_minus_declared_eta() -> None:
+    # land_by 790, E 760: span 30, so slot 760 -> 1.0, 772 -> 18/30 = 0.6 (45 min span would give 0.4)
+    r = solve(packets(pilot=pilot(790, 760, eta=760)), TI, [], set())
+    assert _cand(r, 772, "A12").utilities["P_S2"] == 0.6
+    plain = solve(packets(), TI, [], set())
+    assert plain.all and _cand(plain, 772, "A12").utilities["P_S2"] == 0.4

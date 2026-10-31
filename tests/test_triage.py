@@ -49,7 +49,7 @@ def test_16_propagation_on_fixture_chain(graph: ImpactGraph) -> None:
     out = propagate(graph, L1, 60)
     rot = [d for d in out if d.edge_type == "ROTATION"]
     assert [(d.node_id, d.depth, d.slack_min, d.propagated_delay_min) for d in rot] == [
-        (L2, 1, 15, 45), (L3, 2, 15, 30), (L4, 3, 10, 20)]
+        (L2, 1, 15, 45), (L3, 2, 5, 40), (L4, 3, 10, 30)]  # CONSTRAINTS.md 3 slacks 15/5/10
     assert all(not d.late_night for d in rot)
     con = [d for d in out if d.edge_type == "CONNECTION"]
     assert len(con) == 1
@@ -69,15 +69,16 @@ def test_16_max_depth_and_negative_slack_clamped(graph: ImpactGraph) -> None:
     assert [d.node_id for d in shallow if d.edge_type == "ROTATION"] == [L2]
     assert [d.node_id for d in shallow if d.edge_type == "CONNECTION"] == [C1]
     big = propagate(graph, L1, 1000)
-    assert [d.propagated_delay_min for d in big if d.edge_type == "ROTATION"] == [985, 970, 960]
+    assert [d.propagated_delay_min for d in big if d.edge_type == "ROTATION"] == [985, 980, 970]
     assert propagate(graph, L4, 60) == []
     assert propagate(graph, "not-a-node", 60) == []
 
 
 def test_16_connection_breaks_only_when_delay_exceeds_gap_minus_mct(graph: ImpactGraph) -> None:
-    # L2 delay 15 -> gap 50 - 35 = 15, not strictly greater: holds
+    # L2 delay 15 -> gap 50 - 35 = 15, not strictly greater: holds (chain L2=15, L3=10, L4=0)
     out = propagate(graph, L1, 30)
-    assert [d.edge_type for d in out] == ["ROTATION", "ROTATION"]
+    assert [(d.edge_type, d.propagated_delay_min) for d in out] == [
+        ("ROTATION", 15), ("ROTATION", 10), ("ROTATION", 0)]
     # L2 delay 16: breaks
     out = propagate(graph, L1, 31)
     assert [d.node_id for d in out if d.edge_type == "CONNECTION"] == [C1]
@@ -92,9 +93,9 @@ def test_16_late_night_flag(graph: ImpactGraph) -> None:
 def test_18_assess_fixture_formula(graph: ImpactGraph, l1_event: DisruptionEvent) -> None:
     a = assess(l1_event, graph, land_by=800, first_slot=700, stress=CALM, policy=config.IMPACT_POLICY)
     pax = _pax(L2, C1)
-    assert a.breakdown == {"knock_on_min": 95.0, "pax_connections_at_risk": float(pax),
+    assert a.breakdown == {"knock_on_min": 115.0, "pax_connections_at_risk": float(pax),
                            "late_night_legs": 0.0, "flights_affected": 3.0}
-    assert a.impact_score == 95 + 3 * pax + 0 + 30
+    assert a.impact_score == 115 + 3 * pax + 0 + 30
     assert a.input_delay_min == 60 and a.tier == 1 and a.tier_reason == "normal"
     assert a.decision_deadline == l1_event.eta_landing
     assert a.graph_version == graph.version and a.policy_version == config.IMPACT_POLICY_VERSION
@@ -126,7 +127,7 @@ def test_18_trigger_not_in_graph_propagates_nothing(graph: ImpactGraph, l1_event
 def test_18_policy_weights_are_read_from_the_policy_dict(graph: ImpactGraph, l1_event: DisruptionEvent) -> None:
     policy = {**config.IMPACT_POLICY, "knock_on_min": 2.0, "pax_connections_at_risk": 0.0}
     a = assess(l1_event, graph, 800, 700, CALM, policy)
-    assert a.impact_score == 2 * 95 + 30
+    assert a.impact_score == 2 * 115 + 30
 
 
 # --- safety tier ------------------------------------------------------------------------------------

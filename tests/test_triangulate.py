@@ -18,7 +18,8 @@ def test_dl1639(sample_store) -> None:
     assert event.flight.code == "DL1639" and event.flight.tail == "UNKNOWN"
     assert event.flight.date == "2015-02-26"
     (closure,) = event.injected
-    assert closure.type == "RUNWAY_CLOSED" and closure.ref == "one of two arrival runways"
+    assert closure.type == "RUNWAY_CLOSED" and closure.ref == "storm (moderate): arrival capacity x0.6"
+    assert closure.severity == "moderate"  # WEATHER_DELAY 30 <= 45 (CAP-3)
     assert closure.start == "12:01"
     assert 731 + 30 <= to_min(closure.end) <= 731 + 30 + 10
     assert event.turn == 1 and event.overrides == []
@@ -80,3 +81,15 @@ def test_weather_only(make_row) -> None:
     event = triangulate(make_row(LATE_AIRCRAFT_DELAY="0"))
     assert event.scenario_type == ScenarioType.WEATHER
     assert event.eta_landing == "11:50"
+
+
+def test_air_time_and_scheduled_time_filled_from_row(make_row) -> None:
+    event = triangulate(make_row())
+    assert event.air_time == 125 and event.scheduled_time == 120  # CONSTRAINTS.md 4 inputs
+    blank = triangulate(make_row(AIR_TIME="", SCHEDULED_TIME="0"))
+    assert blank.air_time is None and blank.scheduled_time is None
+
+
+def test_severe_storm_when_weather_delay_over_45(make_row) -> None:
+    (storm,) = triangulate(make_row(WEATHER_DELAY="46")).injected
+    assert storm.severity == "severe" and storm.ref == "storm (severe): arrival capacity x0.4"

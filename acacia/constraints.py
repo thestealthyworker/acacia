@@ -11,9 +11,13 @@ import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from acacia import config
+from acacia.timeutil import to_min
+
+if TYPE_CHECKING:
+    from acacia.models import DisruptionEvent
 
 CHALLENGE_DIR: Path = config.DATA_DIR / "challenge"
 FILES = ("airport_capacity.csv", "wake_separation.csv", "fuel_and_crew.csv", "rules_of_play.csv")
@@ -173,6 +177,24 @@ def holding_fuel_kg(slot: int, eta: int, wake: str) -> float:
     return round(max(0, slot - eta) * burn_kg_per_h(wake) / 60.0, 1)
 
 
+def decision_time_min(event: DisruptionEvent) -> int:
+    """Gate-change notice reference (GATE-1): the event's decision_time, else the earliest
+    injected disruption start, else E - 30 (ASSUMED). Shared by solver inputs, agents and checker."""
+    if event.decision_time:
+        return to_min(event.decision_time)
+    if event.injected:
+        return min(to_min(i.start) for i in event.injected)
+    return to_min(event.eta_landing) - DEFAULT_DECISION_LEAD_MIN
+
+
+def crew_duty_end(sched_arrival: int, scheduled_time: int | None) -> int | None:
+    """Flight-crew duty end on the destination clock (CREW-1): report = scheduled departure - 60,
+    where scheduled departure = scheduled arrival - SCHEDULED_TIME; None without a block time."""
+    if not scheduled_time or scheduled_time <= 0:
+        return None
+    return sched_arrival - scheduled_time - REPORT_BEFORE_DEP_MIN + FLIGHT_CREW_MAX_DUTY_MIN
+
+
 @lru_cache(maxsize=1)
 def constraints_version() -> str:
     h = hashlib.sha256()
@@ -208,12 +230,23 @@ REGISTRY: tuple[ConstraintItem, ...] = (
     ConstraintItem("FUEL-4", "fuel_and_crew", "Holding fuel burn", "2,400 / 6,500 kg/h",
                    "as given; widebody = Heavy class", "AS_GIVEN"),
     ConstraintItem("CREW-1", "fuel_and_crew", "Flight crew max duty", "13 h from report",
-                   "report = scheduled departure - 60 of this leg", "ASSUMED"),
+                   "report = scheduled departure - 60 of this leg (SCHEDULED_ARRIVAL - SCHEDULED_TIME, "
+                   "destination clock); declared and checked only when the end falls inside the day",
+                   "ASSUMED", "earlier legs of the crew's day are not in the data"),
     ConstraintItem("CREW-2", "fuel_and_crew", "Ground crew shift", "8 h; overtime 1.5x", "as given", "AS_GIVEN"),
     ConstraintItem("CREW-3", "fuel_and_crew", "Ground max overtime", "not stated",
                    "45 min hard; reject over 20 min (red line)", "ASSUMED"),
     ConstraintItem("GATE-1", "fuel_and_crew", "Gate-change notice", ">= 20 min before arrival",
                    "HARD; decision time = disruption start or E - 30", "ASSUMED", "limit as given, decision time assumed"),
+    ConstraintItem("GATE-2", "fuel_and_crew", "Remote stands", "not stated",
+                   "REMOTE-1..9, each one bookable stand; a remote stand counts as a gate change",
+                   "ASSUMED"),
+    ConstraintItem("WAKE-7", "wake_separation", "Wake class of other negotiated flights", "not stated",
+                   "Large (the ledger stores no aircraft class)", "ASSUMED"),
+    ConstraintItem("CAP-8", "airport_capacity", "Storm severity when not given", "not stated",
+                   "moderate (x0.6) unless the injected event says severe", "ASSUMED"),
+    ConstraintItem("FUEL-5", "fuel_and_crew", "Fuel utility span", "not stated",
+                   "(land_by - slot) / (land_by - E); 45 min when E is not declared", "ASSUMED"),
     ConstraintItem("PLAY-1", "rules_of_play", "Qualifying input", "WEATHER_DELAY > 15 or LATE_AIRCRAFT_DELAY > 20",
                    "as given, plus earliest landing 01:00-21:30", "CHANGED", "no midnight crossing in the MVP"),
     ConstraintItem("PLAY-2", "rules_of_play", "Turn and 3-turn limit", "3 turns", "turn 1 declare, turns 2-3 vote", "AS_GIVEN"),

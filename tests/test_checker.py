@@ -1,6 +1,10 @@
 """HANDOVER 14 test 5 (one pass and one fail per rule, with boundaries), the PLAN 2.A.1
 turnaround-overlap case, test 21's checker part (a double booking fails RESOURCE_CONFLICT)
-and a static check that checker.py imports nothing from the solver."""
+and a static check that checker.py imports nothing from the solver.
+
+Separation uses the CONSTRAINTS.md 2 wake table at 140 kt (Large/Large 3 nm = 1.29 min,
+Heavy->Large 5 nm = 2.14 min, Super->Large 7 nm = exactly 3.0 min), and GATE_CHANGE_NOTICE
+is the workbook's hard 20 min notice (CONSTRAINTS.md 3)."""
 
 from __future__ import annotations
 
@@ -50,11 +54,13 @@ def event(dl1639_row):
 
 
 def _private(free_slots=(740, 748), traffic=(736, 744 + 8), land_by=790, free_from=None,
-             failed=(), min_turn=35, duty_limit=861) -> PrivateState:
+             failed=(), min_turn=35, duty_limit=861, classes=None, own="Large") -> PrivateState:
     free_from = free_from or {"A7": 700, "A10": 701, "A12": 745}
+    traffic_classes = {t: "Large" for t in traffic} | (classes or {})
     return PrivateState(
         atc=AtcPrivate(first=738, free_slots=list(free_slots), demand={s: 1 for s in free_slots},
-                       traffic=list(traffic), closures=[]),
+                       traffic=list(traffic), closures=[], own_class=own,
+                       traffic_classes=traffic_classes),
         pilot=PilotPrivate(land_by=land_by, pax=30, connect_by=760),
         ground=GroundPrivate(gates=list(free_from), assigned_gate=next(iter(free_from)),
                              free_from=free_from, failed=list(failed), min_turn=min_turn,
@@ -78,22 +84,41 @@ def _run(event, private, slot, gate="A7", world=None, ledger=EMPTY):
 # --- clean pass ---------------------------------------------------------------------------
 def test_clean_package_passes_every_rule(event) -> None:
     result = _run(event, _private(), 740)
-    assert result.passed and len(result.rules) == 5 and result.failed() == []
+    assert result.passed and len(result.rules) == 6 and result.failed() == []
     assert {r.rule for r in result.rules} == {
         ReasonCode.SEPARATION, ReasonCode.FUEL_LIMIT, ReasonCode.GATE_CONFLICT,
-        ReasonCode.CREW_DUTY, ReasonCode.RESOURCE_CONFLICT}
+        ReasonCode.CREW_DUTY, ReasonCode.RESOURCE_CONFLICT, ReasonCode.GATE_CHANGE_NOTICE}
     assert all(r.detail for r in result.rules)
 
 
 # --- SEPARATION ---------------------------------------------------------------------------
-def test_separation_exactly_three_minutes_passes(event) -> None:
-    result = _run(event, _private(traffic=(737, 743)), 740)
+def test_separation_exactly_at_wake_minimum_passes(event) -> None:
+    """Super leader -> Large follower is 7 nm = exactly 3.0 min: a 3 min gap passes."""
+    result = _run(event, _private(traffic=(737, 743), classes={737: "Super"}), 740)
     assert _rule(result, ReasonCode.SEPARATION).passed
 
 
-def test_separation_two_minutes_fails(event) -> None:
-    result = _run(event, _private(traffic=(738,)), 740)
+def test_separation_below_wake_minimum_fails(event) -> None:
+    result = _run(event, _private(traffic=(738,), classes={738: "Super"}), 740)
     assert not _rule(result, ReasonCode.SEPARATION).passed and not result.passed
+
+
+def test_wake_table_replaces_flat_three_minutes(event) -> None:
+    """2 min behind a Large passes (1.29 min); 2 min behind a Heavy fails (2.14 min)."""
+    assert _rule(_run(event, _private(traffic=(738,)), 740), ReasonCode.SEPARATION).passed
+    rule = _rule(_run(event, _private(traffic=(738,), classes={738: "Heavy"}), 740),
+                 ReasonCode.SEPARATION)
+    assert not rule.passed and "Heavy" in rule.detail
+
+
+def test_heavy_own_class_needs_space_before_the_follower(event) -> None:
+    p = _private(traffic=(742,), own="Heavy")  # Heavy -> Large follower needs 2.14 min
+    assert not _rule(_run(event, p, 740), ReasonCode.SEPARATION).passed
+    assert _rule(_run(event, _private(traffic=(743,), own="Heavy"), 740), ReasonCode.SEPARATION).passed
+
+
+def test_traffic_at_the_same_minute_fails(event) -> None:
+    assert not _rule(_run(event, _private(traffic=(740,)), 740), ReasonCode.SEPARATION).passed
 
 
 def test_separation_slot_not_free_fails(event) -> None:
@@ -167,6 +192,19 @@ def test_crew_past_duty_limit_fails(event) -> None:
     assert not _rule(result, ReasonCode.CREW_DUTY).passed and not result.passed
 
 
+def _with_crew_end(private: PrivateState, end: int) -> PrivateState:
+    return private.model_copy(update={"pilot": private.pilot.model_copy(update={"crew_duty_end": end})})
+
+
+def test_flight_crew_duty_end_is_verified(event) -> None:
+    ok = _rule(_run(event, _with_crew_end(_private(), 740 + TI), 740), ReasonCode.CREW_DUTY)
+    assert ok.passed and "flight crew duty end" in ok.detail
+    late = _run(event, _with_crew_end(_private(), 740 + TI - 1), 740)
+    assert not _rule(late, ReasonCode.CREW_DUTY).passed and not late.passed
+    after_today = _rule(_run(event, _with_crew_end(_private(), 1500), 740), ReasonCode.CREW_DUTY)
+    assert after_today.passed and "after today" in after_today.detail
+
+
 # --- RESOURCE_CONFLICT (live ledger) -----------------------------------------------------------
 @pytest.fixture
 def ledger(event, tmp_path) -> Ledger:
@@ -202,6 +240,20 @@ def test_checker_reads_live_ledger_not_a_snapshot(event, ledger) -> None:
     assert not _run(event, _private(), 740, ledger=ledger.live()).passed
 
 
+def test_held_slot_inside_wake_minimum_fails(event, ledger) -> None:
+    ledger.hold("OTHER", "ATL", 741, "A10", 751, 786)  # 1 min < 1.29 min (Large/Large)
+    rule = _rule(_run(event, _private(), 740, ledger=ledger.live()), ReasonCode.RESOURCE_CONFLICT)
+    assert not rule.passed and "runway slot" in rule.detail
+
+
+def test_held_slot_beyond_wake_minimum_passes(event, ledger) -> None:
+    ledger.hold("OTHER", "ATL", 742, "A10", 752, 787)  # 2 min >= 1.29 min
+    live = ledger.live()
+    assert _rule(_run(event, _private(), 740, ledger=live), ReasonCode.RESOURCE_CONFLICT).passed
+    heavy = _run(event, _private(own="Heavy"), 740, ledger=live)  # Heavy -> Large needs 2.14
+    assert not _rule(heavy, ReasonCode.RESOURCE_CONFLICT).passed
+
+
 def test_double_booking_package_fails_with_real_world(event, ledger) -> None:
     """Test 21 (checker part): a package taking another event's held slot and gate fails."""
     world = AirportWorld("ATL", event.flight.date, event.injected)
@@ -213,6 +265,37 @@ def test_double_booking_package_fails_with_real_world(event, ledger) -> None:
     ledger.hold("OTHER", "ATL", slot, gate, start, start + private.ground.min_turn)
     result = check(_pkg(event, slot, gate), event, private, world, ledger.live())
     assert not result.passed and not _rule(result, ReasonCode.RESOURCE_CONFLICT).passed
+
+
+# --- GATE_CHANGE_NOTICE (CONSTRAINTS.md 3, hard 20 min) -------------------------------------
+def test_assigned_gate_needs_no_notice(event) -> None:
+    late = event.model_copy(update={"decision_time": "12:29"})  # 1 min before gate arrival
+    assert _rule(_run(late, _private(), 740, gate="A7"), ReasonCode.GATE_CHANGE_NOTICE).passed
+
+
+def test_gate_change_with_exactly_twenty_minutes_notice_passes(event) -> None:
+    timed = event.model_copy(update={"decision_time": "12:10"})  # gate arrival 12:30
+    assert _rule(_run(timed, _private(), 740, gate="A10"), ReasonCode.GATE_CHANGE_NOTICE).passed
+
+
+def test_gate_change_with_nineteen_minutes_notice_fails(event) -> None:
+    timed = event.model_copy(update={"decision_time": "12:11"})
+    result = _run(timed, _private(), 740, gate="A10")
+    rule = _rule(result, ReasonCode.GATE_CHANGE_NOTICE)
+    assert not rule.passed and not result.passed and "19 min" in rule.detail
+
+
+def test_remote_stand_counts_as_a_gate_change(event) -> None:
+    timed = event.model_copy(update={"decision_time": "12:11"})
+    rule = _rule(_run(timed, _private(), 740, gate="REMOTE-1"), ReasonCode.GATE_CHANGE_NOTICE)
+    assert not rule.passed
+
+
+def test_decision_time_defaults(event) -> None:
+    assert checker.decision_time_min(event) == 12 * 60 + 1  # earliest injected start (12:01)
+    bare = event.model_copy(update={"injected": []})
+    assert checker.decision_time_min(bare) == 12 * 60 + 11 - 30  # E - 30
+    assert checker.decision_time_min(event.model_copy(update={"decision_time": "11:00"})) == 660
 
 
 # --- input validation and isolation ---------------------------------------------------------

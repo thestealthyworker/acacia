@@ -5,6 +5,9 @@ inbound flight to same-airline departures 35..120 min later. Plain dicts, no net
 here calls an LLM; every random value (connection pax) is seeded through `config.seeded_rng`.
 
 Times are int minutes after local midnight; node ids keep the original hhmm integer.
+
+Rotation slack uses the challenge workbook's minimum turnaround at the connecting station
+(`constraints.min_turnaround(a.dest)`, CONSTRAINTS.md 3 / CAP-6), not the distance rule.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from acacia import config
+from acacia import config, constraints
 from acacia.data import is_iata, normalise_flight_no, num, row_date
 from acacia.timeutil import parse_hhmm
 
@@ -68,6 +71,12 @@ def _node_from_row(row: dict[str, object], order: int) -> dict[str, object]:
         "late_aircraft_delay": num(row, "LATE_AIRCRAFT_DELAY"),
         "file_order": order,
     }
+
+
+def _slack(a: dict[str, object], b: dict[str, object]) -> int:
+    """max(0, b.dep - a.arr - min_turn), with min_turn the workbook turnaround at a.dest (CAP-6)."""
+    turn = constraints.min_turnaround(str(a["dest"]))
+    return max(0, int(b["sched_dep"]) - int(a["sched_arr"]) - turn)
 
 
 def _code_frame(nodes: Iterable[dict[str, object]]) -> pd.DataFrame:
@@ -161,8 +170,7 @@ class ImpactGraph:
                 a, b = self.nodes[a_id], self.nodes[b_id]
                 if a["dest"] != b["origin"] or int(b["sched_dep"]) < int(a["sched_arr"]) - ROTATION_TOLERANCE:
                     continue
-                slack = max(0, int(b["sched_dep"]) - int(a["sched_arr"]) - config.min_turn(int(a["distance"])))
-                self.rotation[a_id] = (b_id, slack)
+                self.rotation[a_id] = (b_id, _slack(a, b))
 
     def _add_connection_edges(self) -> None:
         """Pandas merge on (airline, airport, hour bucket) with integer codes, then the gap filter."""

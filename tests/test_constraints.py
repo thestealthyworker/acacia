@@ -43,3 +43,26 @@ def test_registry_ids_unique_and_version_stable():
     ids = [i.id for i in c.REGISTRY]
     assert len(ids) == len(set(ids))
     assert len(c.constraints_version()) == 12
+
+
+def test_crew_duty_end_from_scheduled_arrival_and_block_time() -> None:
+    # arrive 12:00 (720), block 120 -> departs 10:00, report 09:00, 13 h -> 22:00
+    assert c.crew_duty_end(720, 120) == 1320
+    assert c.crew_duty_end(720, None) is None and c.crew_duty_end(720, 0) is None
+
+
+def test_decision_time_is_shared_by_checker_and_agents(dl1639_row) -> None:
+    from acacia import checker
+    from acacia.agents import declared
+    from acacia.triangulate import triangulate
+
+    event = triangulate(dl1639_row)
+    assert checker.decision_time_min is c.decision_time_min is declared.decision_time_min
+    assert c.decision_time_min(event) == 12 * 60 + 1  # earliest injected start
+
+
+def test_registry_lists_the_build_deviations() -> None:
+    ids = [item.id for item in c.REGISTRY]
+    assert len(ids) == len(set(ids))
+    assert {"GATE-1", "GATE-2", "WAKE-7", "CAP-8", "FUEL-5", "CREW-1"} <= set(ids)
+    assert all(item.status in ("AS_GIVEN", "ASSUMED", "CHANGED", "NOT_MODELLED") for item in c.REGISTRY)

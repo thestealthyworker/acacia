@@ -13,19 +13,20 @@ import pytest
 from acacia.agents import make_agents
 from acacia.agents.base import Agent, AgentTimeout
 from acacia.agents.llm import (
-    DECIDE_TOOL, DECLARE_TOOL, LLMAgent, audit_declaration, make_llm_agents, recording_path,
-    tool_choice_for,
+    DECIDE_TOOL, DECLARE_TOOL, LLMAgent, audit_declaration, decision_time_min, expected_declaration,
+    make_llm_agents, recording_path, tool_choice_for, wake_value,
 )
 from acacia.agents.replay import RecordingMissingError, ReplayAgent, ReplayMismatchWarning, make_replay_agents
 from acacia.agents.rule import RuleATC, RuleGround, RulePilot
 from acacia.models import (
-    AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, PilotPrivate,
-    ResolutionPackage, Verdict,
+    AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, HardLimit,
+    PilotPrivate, ReasonCode, ResolutionPackage, Verdict,
 )
 from acacia.triangulate import triangulate
 
 ATC = AtcPrivate(first=740, free_slots=[740, 748, 760, 772], demand={740: 4, 748: 3, 760: 2, 772: 1},
-                 traffic=[732, 736, 744, 752, 756, 764, 768, 776], closures=[(700, 760)])
+                 traffic=[732, 736, 744, 752, 756, 764, 768, 776], closures=[(700, 760)],
+                 own_class="Large", traffic_classes={732: "Heavy", 736: "Large", 744: "Small"})
 PILOT = PilotPrivate(land_by=790, pax=38, connect_by=760)
 GROUND = GroundPrivate(gates=["A7", "A10", "A12"], assigned_gate="A7",
                        free_from={"A7": 761, "A10": None, "A12": 750}, failed=["A10"],
@@ -64,6 +65,19 @@ def _dump(model: ConstraintPacket | Decision) -> dict:
     return model.model_dump(mode="json")
 
 
+def _complete(event: DisruptionEvent, role: AgentRole) -> ConstraintPacket:
+    """A rule packet with every hard limit CONSTRAINTS.md asks for (wake, gate-change notice).
+
+    Independent of whether rule.py has moved to the challenge limits yet: limits are replaced by id.
+    """
+    packet = RULE[role].declare(event, PRIVATE[role])
+    hard = {h.id: h for h in packet.hard}
+    for kind, limit_id, rule, value in expected_declaration(role, PRIVATE[role], event):
+        if kind == "hard":
+            hard[limit_id] = HardLimit(id=limit_id, rule=rule, value=value)
+    return packet.model_copy(update={"hard": list(hard.values())})
+
+
 @pytest.fixture
 def event(dl1639_row) -> DisruptionEvent:
     return triangulate(dl1639_row)
@@ -76,7 +90,7 @@ def _pkg(event: DisruptionEvent, slot: str = "12:40", gate: str = "A12", pid: st
 
 # --- declare / decide ----------------------------------------------------------------------------
 def test_valid_declare_one_forced_tool_call(event) -> None:
-    expected = RuleATC().declare(event, ATC)
+    expected = _complete(event, AgentRole.ATC)
     client = FakeClient([_dump(expected)])
     agent = LLMAgent(AgentRole.ATC, client=client, model="claude-haiku-5-5")
     assert isinstance(agent, Agent)
@@ -92,6 +106,7 @@ def test_valid_declare_one_forced_tool_call(event) -> None:
     user = call["messages"][0]["content"]
     assert event.event_id in user and "12:20" in user  # shared event + own private state (HH:MM)
     assert "land_by" not in user and "duty_limit" not in user  # never another agent's state
+    assert '"own_wake_class": "Large"' in user and '"Heavy>Large": 2.1' in user  # workbook wake table
 
 
 def test_each_role_gets_its_own_system_prompt(event) -> None:
@@ -181,15 +196,61 @@ def test_audit_flags_mismatched_hard_limit_without_correcting(event) -> None:
     assert "P_H1" in note["text"]
 
 
-def test_audit_clean_for_rule_declarations(event) -> None:
+def test_audit_clean_for_constraint_complete_declarations(event) -> None:
     for role in AgentRole:
-        assert audit_declaration(role, RULE[role].declare(event, PRIVATE[role]), PRIVATE[role]) == []
+        assert audit_declaration(role, _complete(event, role), PRIVATE[role], event) == []
 
 
 def test_audit_flags_missing_ground_limits(event) -> None:
-    packet = RuleGround().declare(event, GROUND).model_copy(update={"hard": [], "facts_owned": {}})
-    ids = {n["id"] for n in audit_declaration(AgentRole.GROUND, packet, GROUND)}
-    assert {"G_H1", "G_H2", "min_turn_min"} <= ids
+    packet = _complete(event, AgentRole.GROUND).model_copy(update={"hard": [], "facts_owned": {}})
+    ids = {n["id"] for n in audit_declaration(AgentRole.GROUND, packet, GROUND, event)}
+    assert {"G_H1", "G_H2", "G_H3", "min_turn_min"} <= ids
+
+
+def test_audit_flags_legacy_flat_separation(event) -> None:
+    legacy = _complete(event, AgentRole.ATC)
+    legacy = legacy.model_copy(update={"hard": [legacy.hard[0], HardLimit(id="A_H2", rule="MIN_SEPARATION_MIN",
+                                                                          value=3)]})
+    [note] = audit_declaration(AgentRole.ATC, legacy, ATC, event)
+    assert note["id"] == "A_H2" and note["rule"] == "WAKE_SEPARATION" and "MIN_SEPARATION_MIN" in note["text"]
+
+
+def test_wake_value_uses_workbook_minutes_at_140_kt() -> None:
+    value = wake_value("Large")
+    assert value["own_class"] == "Large" and value["table"] == "workbook"
+    assert value["min_minutes"] == {"Heavy>Large": 2.1, "Large>Heavy": 1.3, "Large>Large": 1.3,
+                                    "Large>Small": 1.7, "Small>Large": 1.3}
+    assert wake_value("Heavy")["min_minutes"]["Heavy>Small"] == 2.6
+
+
+def test_decision_time_payload_then_injected_start_then_eta_minus_30(event) -> None:
+    assert decision_time_min(event) == 12 * 60 + 1  # earliest injected start 12:01
+    assert decision_time_min(event.model_copy(update={"decision_time": "11:30"})) == 11 * 60 + 30
+    assert decision_time_min(event.model_copy(update={"injected": []})) == 12 * 60 + 11 - 30
+
+
+def test_ground_gate_change_notice_declared_and_computed(event) -> None:
+    short = event.model_copy(update={"decision_time": "12:40"})  # gate arrival 12:50 -> 10 min notice
+    packet = _complete(short, AgentRole.GROUND)
+    g_h3 = next(h for h in packet.hard if h.id == "G_H3")
+    assert g_h3.rule == "GATE_CHANGE_NOTICE"
+    assert g_h3.value == {"min_notice_min": 20, "decision_time": "12:40", "assigned_gate": "A7"}
+    reject = {"event_id": event.event_id, "package_id": "P1", "agent": "GROUND", "turn": 2,
+              "verdict": "REJECT", "reason_code": "GATE_CHANGE_NOTICE", "cites": "G_H3",
+              "rationale": "Only 10 min notice for a move off A7."}
+    client = FakeClient([reject])
+    decision = LLMAgent(AgentRole.GROUND, client=client).decide(short, _pkg(short), GROUND, packet)
+    assert decision.reason_code == ReasonCode.GATE_CHANGE_NOTICE and decision.cites in packet.ids()
+    user = client.messages.calls[0]["messages"][0]["content"]
+    assert '"gate_change": true' in user and '"gate_change_notice_min": 10' in user
+    assert '"overtime_min": 0' in user and '"turnaround_end": "13:25"' in user
+
+
+def test_pilot_decide_gets_fuel_margin_computed_by_code(event) -> None:
+    packet = RulePilot().declare(event, PILOT)
+    client = FakeClient([_dump(RulePilot().decide(event, _pkg(event), PILOT, packet))])
+    LLMAgent(AgentRole.PILOT, client=client).decide(event, _pkg(event), PILOT, packet)
+    assert '"fuel_margin_min": 30' in client.messages.calls[0]["messages"][0]["content"]  # 13:10 - 12:40
 
 
 def test_tool_choice_auto_for_models_without_forced_tools() -> None:
@@ -202,7 +263,7 @@ def _record_all(event: DisruptionEvent, tmp_path) -> tuple[dict, dict]:
     packets, decisions = {}, {}
     for role in AgentRole:
         rule = RULE[role]
-        pk = rule.declare(event, PRIVATE[role])
+        pk = _complete(event, role)
         dec = rule.decide(event, _pkg(event), PRIVATE[role], pk)
         agent = LLMAgent(role, client=FakeClient([_dump(pk), _dump(dec)]), record=True,
                          recordings_dir=tmp_path)

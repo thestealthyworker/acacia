@@ -3,11 +3,16 @@
 Red lines are private (never declared): Pilot rejects when connections are fully lost
 (gate arrival >= connect_by + 30, PLAN 3.3) and pax >= 25; Ground rejects when crew
 overtime max(0, slot + Ti + min_turn - shift_end) exceeds 20 min (PLAN 3.4).
+Hard limits follow CONSTRAINTS.md: A_H2 WAKE_SEPARATION, P_H2 FLIGHT_CREW_DUTY_END (when the
+duty end falls inside the day) and G_H3 GATE_CHANGE_NOTICE, with the same values the LLM
+agents declare (acacia.agents.declared).
 """
 
 from __future__ import annotations
 
 from acacia.agents.base import AgentPrivate, coerce_private
+from acacia.agents.declared import crew_duty_hhmm, decision_time_min, gate_notice_value, wake_value
+from acacia.constraints import GATE_CHANGE_NOTICE_MIN
 from acacia.models import (
     AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, HardLimit,
     Option, PilotPrivate, ReasonCode, ResolutionPackage, SoftPref, Verdict,
@@ -47,7 +52,7 @@ class RuleATC:
         return ConstraintPacket(
             event_id=event.event_id, agent=self.role, turn=event.turn,
             hard=[HardLimit(id="A_H1", rule="SLOT_IN_SEQUENCE", value=[to_hhmm(s) for s in slots]),
-                  HardLimit(id="A_H2", rule="MIN_SEPARATION_MIN", value=a.min_separation)],
+                  HardLimit(id="A_H2", rule="WAKE_SEPARATION", value=wake_value(a.own_class))],
             soft=[SoftPref(id="A_S1", preference="Use low-demand slots to protect sector throughput",
                            weight=0.7, metric="slot_demand")],
             options=[Option(type="SLOT", value=to_hhmm(s), demand=a.demand.get(s, 1)) for s in slots],
@@ -86,13 +91,13 @@ class RulePilot:
         p: PilotPrivate = coerce_private(self.role, private)  # type: ignore[assignment]
         return ConstraintPacket(
             event_id=event.event_id, agent=self.role, turn=event.turn,
-            hard=[HardLimit(id="P_H1", rule="LAND_BY", value=to_hhmm(p.land_by))],
+            hard=_pilot_hard(p),
             soft=[SoftPref(id="P_S1", weight=0.7, metric="gate_arrival_by",
                            preference=f"At gate by {to_hhmm(p.connect_by)} to protect {p.pax} "
                                       "connecting passengers",
                            target=to_hhmm(p.connect_by), stake=p.pax),
                   SoftPref(id="P_S2", preference="Maximise fuel margin at landing", weight=0.3,
-                           metric="fuel_margin")],
+                           metric="fuel_margin", target=event.eta_landing)],
             options=[],
             facts_owned={"fuel_endurance_until": to_hhmm(p.land_by), "connecting_pax": p.pax},
         )
@@ -106,12 +111,23 @@ class RulePilot:
         if slot > p.land_by:
             return _reject(base, ReasonCode.FUEL_LIMIT, "P_H1",
                            f"Landing at {package.slot} is past my fuel limit of {to_hhmm(p.land_by)}.")
+        if p.crew_duty_end is not None and gate_arr > p.crew_duty_end:
+            return _reject(base, ReasonCode.CREW_DUTY, "P_H2",
+                           f"Gate arrival {to_hhmm(gate_arr)} is past the flight crew duty limit.")
         if gate_arr >= p.connect_by + CONNECTION_LOSS_MIN and p.pax >= PILOT_RED_LINE_PAX:
             return _reject(base, ReasonCode.CONNECTION_RISK, "P_S1",
                            f"Gate arrival {to_hhmm(gate_arr)} strands all {p.pax} connecting passengers "
                            f"(need {to_hhmm(p.connect_by)}).")
         status = "protected" if gate_arr <= p.connect_by else "partly at risk"
         return _accept(base, f"Fuel margin {p.land_by - slot} min; connections {status}.")
+
+
+def _pilot_hard(p: PilotPrivate) -> list[HardLimit]:
+    hard = [HardLimit(id="P_H1", rule="LAND_BY", value=to_hhmm(p.land_by))]
+    duty = crew_duty_hhmm(p)
+    if duty is not None:
+        hard.append(HardLimit(id="P_H2", rule="FLIGHT_CREW_DUTY_END", value=duty))
+    return hard
 
 
 class RuleGround:
@@ -125,7 +141,8 @@ class RuleGround:
             hard=[HardLimit(id="G_H1", rule="GATE_FREE_FROM",
                             value={x: (to_hhmm(g.free_from[x]) if _usable(g, x) else "unavailable")
                                    for x in g.gates}),
-                  HardLimit(id="G_H2", rule="CREW_DUTY_LIMIT", value=to_hhmm(g.duty_limit))],
+                  HardLimit(id="G_H2", rule="CREW_DUTY_LIMIT", value=to_hhmm(g.duty_limit)),
+                  HardLimit(id="G_H3", rule="GATE_CHANGE_NOTICE", value=gate_notice_value(event, g))],
             soft=[SoftPref(id="G_S1", weight=0.6, metric="turnaround_done_by", target=to_hhmm(g.shift_end),
                            preference=f"Finish turnaround before crew shift ends {to_hhmm(g.shift_end)} "
                                       "(no overtime)"),
@@ -144,6 +161,11 @@ class RuleGround:
         if not _gate_ready(g, package.gate, gate_arr):
             return _reject(base, ReasonCode.GATE_CONFLICT, "G_H1",
                            f"Gate {package.gate} is not available at {to_hhmm(gate_arr)}.")
+        notice = gate_arr - decision_time_min(event)
+        if package.gate != g.assigned_gate and notice < GATE_CHANGE_NOTICE_MIN:
+            return _reject(base, ReasonCode.GATE_CHANGE_NOTICE, "G_H3",
+                           f"Changing to {package.gate} gives only {notice} min notice "
+                           f"(need {GATE_CHANGE_NOTICE_MIN}).")
         if done > g.duty_limit:
             return _reject(base, ReasonCode.CREW_DUTY, "G_H2",
                            f"Turnaround would breach the crew duty limit {to_hhmm(g.duty_limit)}.")

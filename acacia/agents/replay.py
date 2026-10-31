@@ -47,7 +47,7 @@ class ReplayAgent:
         record = self._load(event.event_id, "declare", event.turn)
         request = build_request(self.role, "declare", record["model"], event, private)
         packet = self._serve(ConstraintPacket, record, request)
-        self.last_audit = audit_declaration(self.role, packet, private)
+        self.last_audit = audit_declaration(self.role, packet, private, event)
         for note in self.last_audit:
             logger.warning("AUDIT %s", note["text"])
         return packet

@@ -1,11 +1,12 @@
 """HANDOVER 14 test 4 (private-state part): the same event and seed give identical private
-state; plus the HANDOVER 6 / 18.2 formulas read from the shared world and the ledger."""
+state; plus the HANDOVER 6 / 18.2 formulas read from the shared world and the ledger, with the
+CONSTRAINTS.md workbook numbers (wake table, per-airport turnaround and spare gates, land_by)."""
 
 from __future__ import annotations
 
 import pytest
 
-from acacia import config
+from acacia import config, constraints
 from acacia.ledger import Ledger
 from acacia.models import EmptyLedgerView, Stress
 from acacia.simulate import build_private, land_by_and_first_slot
@@ -49,14 +50,45 @@ def test_salt_changes_private_state(event, world, monkeypatch) -> None:
     assert build_private(event, None, other_world, EMPTY).model_dump() != base.model_dump()
 
 
+def _wake_ok(slot: int, own: str, atc) -> bool:
+    """CONSTRAINTS.md 2: nearest previous and next traffic, wake table at 140 kt."""
+    prev = [t for t in atc.traffic if t <= slot]
+    nxt = [t for t in atc.traffic if t > slot]
+    ok_prev = not prev or slot - max(prev) >= constraints.wake_minutes(atc.traffic_classes[max(prev)], own)
+    ok_next = not nxt or min(nxt) - slot >= constraints.wake_minutes(own, atc.traffic_classes[min(nxt)])
+    return ok_prev and ok_next
+
+
 def test_atc_weather_queue_and_closure_slots(event, world) -> None:
     atc = build_private(event, None, world, EMPTY).atc
     eta = to_min(event.eta_landing)
     assert atc.first == eta + round(30 * 0.6)
     assert len(atc.free_slots) == 3  # closure overlaps [E, first]
-    assert atc.free_slots == world.free_slots_after(atc.first, 3, EMPTY)
+    candidates = world.free_slots_after(atc.first, 12, EMPTY)
+    assert atc.free_slots == [s for s in candidates if _wake_ok(s, "Large", atc)][:3]
     assert all(s >= atc.first and not world.is_traffic(s) for s in atc.free_slots)
-    assert atc.min_separation == 3 and atc.closures
+    assert atc.closures
+
+
+def test_atc_wake_classes(event, world, make_row) -> None:
+    atc = build_private(event, None, world, EMPTY).atc
+    assert atc.own_class == "Large"  # distance 547 <= 2000 (WAKE-3)
+    assert set(atc.traffic_classes) == set(atc.traffic)
+    assert set(atc.traffic_classes.values()) <= {"Super", "Heavy", "Large", "Small"}
+    assert all(_wake_ok(s, atc.own_class, atc) for s in atc.free_slots)
+    heavy = triangulate(make_row(DISTANCE="2100"))
+    assert build_private(heavy, None, world, EMPTY).atc.own_class == "Heavy"
+
+
+def test_free_slot_too_close_behind_heavy_traffic_is_dropped(event, world, monkeypatch) -> None:
+    """A free point 2 min behind a Heavy (5 nm = 2.14 min) is not declared; behind a Large it is."""
+    eta = to_min(event.eta_landing)
+    lead = next(t for t in world.traffic_times(eta, eta + 150) if not world.is_traffic(t + 2))
+    monkeypatch.setattr(world, "free_slots_after", lambda t, n, view: [lead + 2, lead + 40, lead + 60])
+    assert lead + 2 in build_private(event, None, world, EMPTY).atc.free_slots
+    monkeypatch.setattr(world, "traffic_class", lambda t: "Heavy", raising=False)
+    atc = build_private(event, None, world, EMPTY).atc
+    assert lead + 2 not in atc.free_slots and atc.traffic_classes[lead] == "Heavy"
 
 
 def test_atc_demand_traffic_and_no_closure(calm_event, calm_world) -> None:
@@ -82,10 +114,27 @@ def test_ledger_held_slot_is_skipped_and_becomes_traffic(event, world, tmp_path)
 def test_pilot_values(event, world) -> None:
     p = build_private(event, None, world, EMPTY)
     eta, sched = to_min(event.eta_landing), to_min(event.sched_arrival)
-    assert eta + 45 <= p.pilot.land_by <= eta + 74
+    assert p.pilot.land_by == eta + 45 + round(0.05 * 125)  # FUEL-2/3: AIR_TIME 125 from the row
+    # CREW-1: report = scheduled arrival - SCHEDULED_TIME (120) - 60, plus 13 h
+    assert p.pilot.crew_duty_end == sched - 120 - 60 + 780
     assert 24 <= p.pilot.pax <= 60  # ATL is a hub
     assert sched + 28 <= p.pilot.connect_by <= sched + 55
     assert p.pilot.low_fuel is False
+
+
+def test_land_by_falls_back_to_scheduled_time_and_none_without_times(event, world) -> None:
+    sched_only = event.model_copy(update={"air_time": None, "scheduled_time": 120})
+    p = build_private(sched_only, None, world, EMPTY).pilot
+    assert p.land_by == to_min(event.eta_landing) + 45 + round(0.05 * 100)  # SCHEDULED_TIME - 20
+    bare = build_private(event.model_copy(update={"air_time": None, "scheduled_time": None}),
+                         None, world, EMPTY).pilot
+    assert bare.land_by == to_min(event.eta_landing) + 45 and bare.crew_duty_end is None
+
+
+def test_land_by_adds_contingency_from_air_time(event, world) -> None:
+    timed = event.model_copy(update={"air_time": 125})
+    p = build_private(timed, None, world, EMPTY)
+    assert p.pilot.land_by == to_min(event.eta_landing) + 45 + round(0.05 * 125)
 
 
 def test_low_fuel_changes_only_land_by(event, world) -> None:
@@ -105,29 +154,38 @@ def test_non_hub_pax_range(make_row, sample_store) -> None:
 def test_ground_gates_and_free_from_come_from_world(event, world) -> None:
     g = build_private(event, None, world, EMPTY).ground
     t = to_min(event.eta_landing) + event.taxi_in
-    assert g.min_turn == 35  # distance 547
-    assert len(g.gates) == 3 and len(set(g.gates)) == 3 and g.gates[0] == g.assigned_gate
+    assert g.min_turn == 45  # CAP-6: ATL workbook turnaround, not the distance rule (35)
+    assert len(g.gates) == 1 + 3  # CAP-5: assigned + ATL's 3 spare gates
+    assert len(set(g.gates)) == len(g.gates) and g.gates[0] == g.assigned_gate
     assert set(g.gates) <= set(world.gates())
     for gate in g.gates:
         assert g.free_from[gate] == world.gate_free_from(gate, t, EMPTY, duration=g.min_turn)
     others = [x for x in world.gates() if x != g.assigned_gate]
-    best = sorted(world.gate_free_from(x, t, EMPTY, duration=35) or 10**6 for x in others)[:2]
+    best = sorted(world.gate_free_from(x, t, EMPTY, duration=45) or 10**6 for x in others)[:3]
     assert sorted(g.free_from[x] or 10**6 for x in g.gates[1:]) == best
+
+
+def test_non_atl_turnaround_and_spare_gates(make_row) -> None:
+    ev = triangulate(make_row(DESTINATION_AIRPORT="BWI"))
+    g = build_private(ev, None, AirportWorld("BWI", ev.flight.date, ev.injected), EMPTY).ground
+    lim = constraints.airport_limits("BWI")
+    assert g.min_turn == lim.min_turnaround_min
+    assert len(g.gates) == 1 + lim.spare_gates
 
 
 def test_ground_shift_duty_and_next_departure(event, world) -> None:
     g = build_private(event, None, world, EMPTY).ground
     t = to_min(event.eta_landing) + event.taxi_in
     sched = to_min(event.sched_arrival)
-    assert t + 35 + 25 <= g.shift_end <= t + 35 + 85
-    assert g.duty_limit == g.shift_end + 45
-    assert sched + 35 + 20 <= g.next_departure <= sched + 35 + 60
+    assert t + 45 + 25 <= g.shift_end <= t + 45 + 85
+    assert g.duty_limit == g.shift_end + 45  # CREW-3: 45 min max overtime
+    assert sched + 45 + 20 <= g.next_departure <= sched + 45 + 60
 
 
 def test_tight_crew_changes_only_shift(event, world) -> None:
     base = build_private(event, None, world, EMPTY)
     tight = build_private(event, Stress(tight_crew=True), world, EMPTY)
-    assert tight.ground.shift_end == tight.atc.first + event.taxi_in + 35 - 6
+    assert tight.ground.shift_end == tight.atc.first + event.taxi_in + 45 - 6
     assert tight.ground.duty_limit == tight.ground.shift_end + 45
     assert tight.ground.next_departure == base.ground.next_departure
     assert tight.pilot == base.pilot and tight.atc == base.atc
