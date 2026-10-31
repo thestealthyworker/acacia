@@ -195,11 +195,12 @@ def test_pilot_rejects_past_crew_duty_end(event) -> None:
 
 
 def test_ground_declares_and_enforces_gate_change_notice(event) -> None:
-    late = event.model_copy(update={"decision_time": "12:30"})  # decided 750
+    late = event.model_copy(update={"decision_time": "12:25"})  # commit 12:30 (750), TIME-4
     k = RuleGround().declare(late, GROUND)
     g_h3 = next(h for h in k.hard if h.id == "G_H3")
     assert g_h3.rule == "GATE_CHANGE_NOTICE"
-    assert g_h3.value == {"min_notice_min": 20, "decision_time": "12:30", "assigned_gate": "A7"}
+    assert g_h3.value == {"min_notice_min": 20, "decision_time": "12:25", "commit_time": "12:30",
+                          "assigned_gate": "A7"}
     assert _decide(RuleGround(), late, GROUND, 760, "A12")[0].verdict == Verdict.ACCEPT  # 770-750 = 20
     d, packet = _decide(RuleGround(), late, GROUND, 759, "A12")  # 19 min notice
     assert d.reason_code == ReasonCode.GATE_CHANGE_NOTICE and d.cites == "G_H3" and d.cites in packet.ids()

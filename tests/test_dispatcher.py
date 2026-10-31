@@ -146,7 +146,9 @@ def test_e_no_double_booking_across_events(scenario_e) -> None:
     for eid, rec in d.records.items():
         held = eid in booked
         assert held == (not rec.package.get("divert") and rec.checker_pass is not False)
-    assert len(booked) >= 3  # the fixture day books most of its triggers
+    # TIME-6 shared clock: rank order dispatches the 14:xx cluster first, so the 12:xx triggers are
+    # reached after their earliest landing and go straight to the (divert) fallback; two still book.
+    assert len(booked) >= 2
 
 
 def test_e_summary_counts(scenario_e) -> None:
