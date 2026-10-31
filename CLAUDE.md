@@ -4,6 +4,7 @@ You are building the Acacia Statement 2 hackathon project: multi-agent disruptio
 
 ## Read in this order before writing any code
 
+0. `CONSTRAINTS.md`: the challenge's operational constraints workbook. It wins over every other file on numbers and limits, and every deviation must be listed in the UI.
 1. `docs/statement-2.png` (and any other statement text in `docs/`): the brief and the "what to avoid" list.
 2. `docs/architecture.html`: the agreed architecture. It wins on design questions.
 3. `HANDOVER.md`: the full build spec. It wins on implementation detail. Read all 18 sections.

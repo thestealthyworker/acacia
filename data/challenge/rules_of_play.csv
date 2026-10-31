@@ -1,0 +1,6 @@
+topic,detail
+Input,Pick one row of flights.csv (WEATHER_DELAY > 15 or LATE_AIRCRAFT_DELAY > 20). That row is the disruption.
+Turn,One turn = each of the three agents sends one structured message. Consensus must be reached within 3 turns.
+No consensus,"After 3 turns without agreement, the deterministic non-AI fallback decides. Log why."
+Constraints,Use the limits in this workbook. Any limit you change must be stated in your demo.
+Output,"A revised arrival time, gate, or flight plan, with a consensus log showing each turn."

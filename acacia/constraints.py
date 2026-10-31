@@ -1,0 +1,224 @@
+"""Challenge operational constraints (CONSTRAINTS.md): the single access point for workbook limits.
+
+Source: docs/challenge2_operational_constraints.xlsx, exported to data/challenge/*.csv.
+No other module reads those CSVs or hard-codes these numbers.
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from acacia import config
+
+CHALLENGE_DIR: Path = config.DATA_DIR / "challenge"
+FILES = ("airport_capacity.csv", "wake_separation.csv", "fuel_and_crew.csv", "rules_of_play.csv")
+
+# --- stated assumptions (CONSTRAINTS.md; each one is a REGISTRY row) ----------------------------
+ARRIVAL_SHARE = 0.5                      # CAP-2
+STORM_FACTOR = {"none": 1.0, "moderate": 0.6, "severe": 0.4}  # CAP-3
+SEVERE_WEATHER_DELAY_MIN = 45            # CAP-3: severe if WEATHER_DELAY > 45
+APPROACH_SPEED_KT = 140.0                # WAKE-2
+HEAVY_DISTANCE_MI = 2000                 # WAKE-3
+TRAFFIC_CLASS_MIX = (("Heavy", 0.15), ("Large", 0.80), ("Small", 0.05))  # WAKE-3
+BACKGROUND_LOAD = 0.55                   # CAP-7
+WORLD_GATE_POOL = 8                      # CAP-4
+FINAL_RESERVE_MIN = 30                   # FUEL-1
+SPARE_HOLDING_MIN = 45                   # FUEL-2 (above final reserve)
+CONTINGENCY_SHARE = 0.05                 # FUEL-3
+BURN_KG_PER_H = {"narrowbody": 2400, "widebody": 6500}  # FUEL-4
+FLIGHT_CREW_MAX_DUTY_MIN = 13 * 60       # CREW-1
+REPORT_BEFORE_DEP_MIN = 60               # CREW-1 (ASSUMED)
+GROUND_SHIFT_MIN = 8 * 60                # CREW-2
+OVERTIME_COST_FACTOR = 1.5               # CREW-2
+GROUND_MAX_OVERTIME_MIN = 45             # CREW-3
+GROUND_OVERTIME_RED_LINE_MIN = 20        # CREW-3
+GATE_CHANGE_NOTICE_MIN = 20              # GATE-1
+DEFAULT_DECISION_LEAD_MIN = 30           # GATE-1: decision time = E - 30 when nothing injected
+
+Storm = Literal["none", "moderate", "severe"]
+
+
+@dataclass(frozen=True)
+class AirportLimits:
+    iata: str
+    size_class: str
+    active_runways: int
+    gates: int
+    max_ops_per_hour: int
+    min_turnaround_min: int
+    spare_gates: int
+    assumed: bool = False  # True when the airport is missing and Non-hub values are used
+
+
+@dataclass(frozen=True)
+class ConstraintItem:
+    id: str
+    sheet: str
+    rule: str
+    workbook_value: str
+    used_value: str
+    status: Literal["AS_GIVEN", "ASSUMED", "CHANGED", "NOT_MODELLED"]
+    note: str = ""
+
+
+def _read(name: str) -> list[dict[str, str]]:
+    path = CHALLENGE_DIR / name
+    if not path.exists():
+        raise FileNotFoundError(f"challenge constraint file missing: {path}")
+    with path.open(newline="") as fh:
+        return [row for row in csv.DictReader(fh) if any(v for v in row.values())]
+
+
+@lru_cache(maxsize=1)
+def _airports() -> dict[str, AirportLimits]:
+    out: dict[str, AirportLimits] = {}
+    for r in _read("airport_capacity.csv"):
+        code = (r.get("IATA_CODE") or "").strip()
+        if not code:
+            continue
+        out[code] = AirportLimits(
+            iata=code, size_class=r["size_class"], active_runways=int(float(r["active_runways"])),
+            gates=int(float(r["gates"])), max_ops_per_hour=int(float(r["max_runway_ops_per_hour"])),
+            min_turnaround_min=int(float(r["min_turnaround_min"])),
+            spare_gates=int(float(r["spare_gates_at_any_time"])),
+        )
+    return out
+
+
+@lru_cache(maxsize=1)
+def _nonhub_default() -> AirportLimits:
+    for lim in _airports().values():
+        if lim.size_class == "Non-hub":
+            return lim
+    raise ValueError("airport_capacity.csv has no Non-hub row for the unknown-airport default")
+
+
+def airport_limits(iata: str) -> AirportLimits:
+    """Workbook limits for an airport; unknown airports get the Non-hub values (ASSUMED)."""
+    lim = _airports().get(iata)
+    if lim is not None:
+        return lim
+    d = _nonhub_default()
+    return AirportLimits(iata, d.size_class, d.active_runways, d.gates, d.max_ops_per_hour,
+                         d.min_turnaround_min, d.spare_gates, assumed=True)
+
+
+def min_turnaround(iata: str) -> int:
+    return airport_limits(iata).min_turnaround_min
+
+
+def storm_level(weather_delay_min: int) -> Storm:
+    if weather_delay_min <= 15:
+        return "none"
+    return "severe" if weather_delay_min > SEVERE_WEATHER_DELAY_MIN else "moderate"
+
+
+def arrival_rate(iata: str, storm: Storm = "none") -> float:
+    """Arrivals per hour: max ops x arrival share x storm factor."""
+    return airport_limits(iata).max_ops_per_hour * ARRIVAL_SHARE * STORM_FACTOR[storm]
+
+
+def wake_class(distance_miles: int | float) -> str:
+    return "Heavy" if distance_miles > HEAVY_DISTANCE_MI else "Large"
+
+
+def _norm_class(label: str) -> str:
+    return label.split("(")[0].strip()
+
+
+@lru_cache(maxsize=1)
+def _wake_table() -> tuple[dict[tuple[str, str], int], int]:
+    table: dict[tuple[str, str], int] = {}
+    default_nm = 3
+    for r in _read("wake_separation.csv"):
+        leader, follower = (r.get("leader") or "").strip(), (r.get("follower") or "").strip()
+        nm = int(float(r["min_separation_nm"]))
+        if leader.lower().startswith("any other"):
+            default_nm = nm
+        elif leader and follower:
+            table[(_norm_class(leader), _norm_class(follower))] = nm
+    return table, default_nm
+
+
+def wake_nm(leader: str, follower: str) -> int:
+    table, default_nm = _wake_table()
+    return table.get((leader, follower), default_nm)
+
+
+def wake_minutes(leader: str, follower: str) -> float:
+    """Minimum arrival spacing in minutes at the assumed approach speed."""
+    return wake_nm(leader, follower) * 60.0 / APPROACH_SPEED_KT
+
+
+def burn_kg_per_h(wake: str) -> int:
+    return BURN_KG_PER_H["widebody" if wake in ("Heavy", "Super") else "narrowbody"]
+
+
+def contingency_min(air_time: int | None, scheduled_time: int | None = None) -> int:
+    base = air_time if air_time else max(0, (scheduled_time or 0) - 20)
+    return round(CONTINGENCY_SHARE * base)
+
+
+def land_by(eta: int, air_time: int | None, scheduled_time: int | None = None) -> int:
+    """Latest landing keeping the 30 min final reserve intact (CONSTRAINTS.md 4)."""
+    return eta + SPARE_HOLDING_MIN + contingency_min(air_time, scheduled_time)
+
+
+def holding_fuel_kg(slot: int, eta: int, wake: str) -> float:
+    return round(max(0, slot - eta) * burn_kg_per_h(wake) / 60.0, 1)
+
+
+@lru_cache(maxsize=1)
+def constraints_version() -> str:
+    h = hashlib.sha256()
+    for name in FILES:
+        h.update((CHALLENGE_DIR / name).read_bytes())
+    return h.hexdigest()[:12]
+
+
+REGISTRY: tuple[ConstraintItem, ...] = (
+    ConstraintItem("CAP-1", "airport_capacity", "Runway movements per hour", "per airport (ATL 90)", "as given", "AS_GIVEN"),
+    ConstraintItem("CAP-2", "airport_capacity", "Arrival share of movements", "not stated", "50%", "ASSUMED"),
+    ConstraintItem("CAP-3", "airport_capacity", "Storm capacity factor", "not stated",
+                   "x0.6 moderate / x0.4 severe; severe if WEATHER_DELAY > 45", "ASSUMED"),
+    ConstraintItem("CAP-4", "airport_capacity", "Gates", "per airport (ATL 150)", "modelled pool of 8 per airport",
+                   "CHANGED", "tractable model; spare-gate rule still applied"),
+    ConstraintItem("CAP-5", "airport_capacity", "Spare gates at any time", "per airport (ATL 3)",
+                   "Ground options = assigned + spare", "AS_GIVEN"),
+    ConstraintItem("CAP-6", "airport_capacity", "Minimum turnaround", "per airport (ATL 45)",
+                   "as given everywhere, incl. impact-graph slack", "AS_GIVEN"),
+    ConstraintItem("CAP-7", "airport_capacity", "Background runway load", "not stated", "55% of capacity points", "ASSUMED"),
+    ConstraintItem("WAKE-1", "wake_separation", "Arrival wake separation", "nm by leader/follower", "as given", "AS_GIVEN"),
+    ConstraintItem("WAKE-2", "wake_separation", "nm to minutes", "not stated", "140 kt (3 nm = 1.3 min)", "ASSUMED"),
+    ConstraintItem("WAKE-3", "wake_separation", "Aircraft wake class", "not in flights.csv",
+                   "Heavy if distance > 2000 mi else Large; traffic 15/80/5 Heavy/Large/Small", "ASSUMED"),
+    ConstraintItem("WAKE-4", "wake_separation", "Same-runway scope", "per runway",
+                   "applied across the merged arrival stream", "CHANGED", "conservative"),
+    ConstraintItem("WAKE-5", "wake_separation", "Super (A380) pairs", "6-8 nm", "no A380 in data", "NOT_MODELLED"),
+    ConstraintItem("WAKE-6", "wake_separation", "Departure min_time_s", "60-180 s", "arrivals only", "NOT_MODELLED"),
+    ConstraintItem("FUEL-1", "fuel_and_crew", "Final fuel reserve", "30 min holding", "never planned below", "AS_GIVEN"),
+    ConstraintItem("FUEL-2", "fuel_and_crew", "Spare fuel on arrival", "45 min holding",
+                   "45 min above the final reserve", "ASSUMED", "interpretation of 'spare'"),
+    ConstraintItem("FUEL-3", "fuel_and_crew", "Contingency fuel", "5% of trip fuel", "5% of AIR_TIME in minutes", "ASSUMED"),
+    ConstraintItem("FUEL-4", "fuel_and_crew", "Holding fuel burn", "2,400 / 6,500 kg/h",
+                   "as given; widebody = Heavy class", "AS_GIVEN"),
+    ConstraintItem("CREW-1", "fuel_and_crew", "Flight crew max duty", "13 h from report",
+                   "report = scheduled departure - 60 of this leg", "ASSUMED"),
+    ConstraintItem("CREW-2", "fuel_and_crew", "Ground crew shift", "8 h; overtime 1.5x", "as given", "AS_GIVEN"),
+    ConstraintItem("CREW-3", "fuel_and_crew", "Ground max overtime", "not stated",
+                   "45 min hard; reject over 20 min (red line)", "ASSUMED"),
+    ConstraintItem("GATE-1", "fuel_and_crew", "Gate-change notice", ">= 20 min before arrival",
+                   "HARD; decision time = disruption start or E - 30", "ASSUMED", "limit as given, decision time assumed"),
+    ConstraintItem("PLAY-1", "rules_of_play", "Qualifying input", "WEATHER_DELAY > 15 or LATE_AIRCRAFT_DELAY > 20",
+                   "as given, plus earliest landing 01:00-21:30", "CHANGED", "no midnight crossing in the MVP"),
+    ConstraintItem("PLAY-2", "rules_of_play", "Turn and 3-turn limit", "3 turns", "turn 1 declare, turns 2-3 vote", "AS_GIVEN"),
+    ConstraintItem("PLAY-3", "rules_of_play", "Fallback logs why", "required", "reason in FallbackPlan and log", "AS_GIVEN"),
+    ConstraintItem("KIT-1", "kit", "Private agent state", "not given",
+                   "slots, pax, gates, crew shift simulated with a fixed seed", "ASSUMED", "labelled simulated"),
+    ConstraintItem("KIT-2", "kit", "Minimum connection time", "not given", "35 min", "ASSUMED"),
+)

@@ -1,0 +1,9 @@
+rule,value,applies_to
+Final fuel reserve,30 minutes of holding fuel,Pilot agent: never plan below this
+Contingency fuel,5% of trip fuel,Pilot agent
+Holding fuel burn (narrowbody),"2,400 kg per hour","Pilot agent, A320/737 class"
+Holding fuel burn (widebody),"6,500 kg per hour","Pilot agent, A330/777 class"
+Assumed spare fuel on arrival,45 minutes of holding (unless the team states otherwise),Pilot agent
+Flight crew max duty,13 hours from report time,Pilot agent (simplified FAA Part 117)
+Ground crew shift,8 hours; overtime costs 1.5x after that,Ground agent
+Gate change notice,At least 20 minutes before arrival,Ground agent

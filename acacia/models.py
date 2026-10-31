@@ -49,6 +49,7 @@ class ReasonCode(str, Enum):
     CREW_DUTY = "CREW_DUTY"
     CONNECTION_RISK = "CONNECTION_RISK"
     RESOURCE_CONFLICT = "RESOURCE_CONFLICT"  # ADDED: checker only, ledger double booking
+    GATE_CHANGE_NOTICE = "GATE_CHANGE_NOTICE"  # ADDED: CONSTRAINTS.md 3, >= 20 min notice
 
 
 # --- event --------------------------------------------------------------------------------
@@ -101,6 +102,8 @@ class DisruptionEvent(BaseModel):
     injected: list[Injected]
     turn: int = 1
     overrides: list[str] = Field(default_factory=list)  # ADDED: fields set by the payload
+    air_time: int | None = None  # ADDED: CONSTRAINTS.md 4, contingency fuel
+    decision_time: HHMM | None = None  # ADDED: CONSTRAINTS.md 3, gate-change notice reference
 
 
 # --- negotiation contracts ---------------------------------------------------------------------
@@ -345,7 +348,9 @@ class AtcPrivate(BaseModel):
     demand: dict[int, int]
     traffic: list[int]
     closures: list[tuple[int, int]]
-    min_separation: int = 3
+    min_separation: int = 3  # legacy kit value; wake table in CONSTRAINTS.md 2 supersedes it
+    own_class: str = "Large"  # ADDED: CONSTRAINTS.md 2 wake class of this flight
+    traffic_classes: dict[int, str] = Field(default_factory=dict)  # ADDED: wake class per traffic time
 
 
 class PilotPrivate(BaseModel):

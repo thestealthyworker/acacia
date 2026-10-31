@@ -1,0 +1,9 @@
+leader,follower,min_separation_nm,min_time_s (same runway departures)
+Super (A380),Heavy,6,180
+Super (A380),Large,7,180
+Super (A380),Small,8,180
+Heavy,Heavy,4,120
+Heavy,Large,5,120
+Heavy,Small,6,120
+Large,Small,4,60
+Any other pair,,3,60
