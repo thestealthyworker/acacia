@@ -23,7 +23,8 @@ from pydantic import BaseModel, ValidationError
 from acacia import config
 from acacia.agents.base import AgentPrivate, AgentTimeout, coerce_private
 from acacia.agents.declared import (  # noqa: F401  (re-exported for callers and tests)
-    WAKE_CLASSES, crew_duty_hhmm, decision_time_min, gate_notice_value, slot_lead_value, wake_value,
+    WAKE_CLASSES, crew_duty_hhmm, decision_time_min, gate_notice_value, slot_lead_value, slot_options,
+    slot_sequence_value, wake_value,
 )
 from acacia.constraints import commit_time_min
 from acacia.models import (
@@ -107,16 +108,23 @@ def private_view(role: AgentRole, private: AgentPrivate | dict, event: Disruptio
 
 
 def _atc_view(p: AtcPrivate, event: DisruptionEvent | None) -> dict:
-    slots = sorted(p.free_slots)
-    view = {"first_available_slot": to_hhmm(p.first), "free_slots": [to_hhmm(s) for s in slots],
-            "slot_demand": {to_hhmm(s): p.demand.get(s, 1) for s in slots},
-            "other_traffic": [to_hhmm(t) for t in sorted(p.traffic)],
-            "traffic_wake_classes": {to_hhmm(t): c for t, c in sorted(p.traffic_classes.items())},
-            "own_wake_class": p.own_class, "wake_separation": wake_value(p.own_class),
+    """ATC view; with per-runway state (CAP-9) the slots, demand and traffic are per arrival runway."""
+    view = {"first_available_slot": to_hhmm(p.first), "own_wake_class": p.own_class,
+            "wake_separation": wake_value(p.own_class),
             "runway_closures": [{"from": to_hhmm(a), "until": to_hhmm(b)} for a, b in p.closures]}
     if event is not None:
         view["slot_lead"] = slot_lead_value(event)
-    return view
+    if not p.free_by_runway:
+        slots = sorted(p.free_slots)
+        return {**view, "free_slots": [to_hhmm(s) for s in slots],
+                "slot_demand": {to_hhmm(s): p.demand.get(s, 1) for s in slots},
+                "other_traffic": [to_hhmm(t) for t in sorted(p.traffic)],
+                "traffic_wake_classes": {to_hhmm(t): c for t, c in sorted(p.traffic_classes.items())}}
+    return {**view, "arrival_runways": sorted(p.free_by_runway),
+            "free_slots_by_runway": slot_sequence_value(p),
+            "slot_options": [o.model_dump(exclude={"type"}) for o in slot_options(p)],
+            "traffic_wake_classes_by_runway": {r: {to_hhmm(t): c for t, c in sorted(v.items())}
+                                               for r, v in sorted(p.traffic_by_runway.items())}}
 
 
 def _gate_free_map(g: GroundPrivate) -> dict[str, str]:
@@ -192,7 +200,7 @@ def expected_declaration(role: AgentRole, private: AgentPrivate | dict,
     p = coerce_private(role, private)
     if isinstance(p, AtcPrivate):
         lead = [("hard", "A_H3", "SLOT_LEAD", slot_lead_value(event))] if event is not None else []
-        return [("hard", "A_H1", "SLOT_IN_SEQUENCE", [to_hhmm(s) for s in sorted(p.free_slots)]),
+        return [("hard", "A_H1", "SLOT_IN_SEQUENCE", slot_sequence_value(p)),
                 ("hard", "A_H2", "WAKE_SEPARATION", wake_value(p.own_class))] + lead
     if isinstance(p, PilotPrivate):
         duty = crew_duty_hhmm(p)

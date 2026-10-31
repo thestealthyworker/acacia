@@ -63,10 +63,13 @@ def test_atc_weather_queue_and_closure_slots(event, world) -> None:
     atc = build_private(event, None, world, EMPTY).atc
     eta = to_min(event.eta_landing)
     assert atc.first == eta + round(30 * 0.6)
-    assert len(atc.free_slots) == 3  # closure overlaps [E, first]
-    assert atc.free_slots == world.free_slots_after(atc.first, 3, EMPTY, own_class="Large")
-    assert all(world.is_separated(s, "Large", EMPTY)[0] for s in atc.free_slots)
-    assert all(s >= atc.first and not world.is_traffic(s) for s in atc.free_slots)
+    assert set(atc.free_by_runway) == {"R1", "R2"}  # CAP-9: ATL has two arrival runways
+    for rwy, slots in atc.free_by_runway.items():
+        assert len(slots) == 3  # closure overlaps [E, first]: 3 per runway
+        assert slots == world.free_slots_after(atc.first, 3, EMPTY, own_class="Large", runway=rwy)
+        assert all(world.is_separated(s, "Large", EMPTY, runway=rwy)[0] for s in slots)
+        assert all(s >= atc.first and not world.is_traffic(s, rwy) for s in slots)
+    assert atc.free_slots == sorted({s for v in atc.free_by_runway.values() for s in v})
     assert atc.closures
 
 
@@ -75,7 +78,10 @@ def test_atc_wake_classes(event, world, make_row) -> None:
     assert atc.own_class == "Large"  # distance 547 <= 2000 (WAKE-3)
     assert set(atc.traffic_classes) == set(atc.traffic)
     assert set(atc.traffic_classes.values()) <= {"Super", "Heavy", "Large", "Small"}
-    assert all(_wake_ok(s, atc.own_class, atc) for s in atc.free_slots)
+    for rwy, slots in atc.free_by_runway.items():  # wake applies on the same runway only (WAKE-4)
+        own_runway = atc.model_copy(update={"traffic": sorted(atc.traffic_by_runway[rwy]),
+                                            "traffic_classes": atc.traffic_by_runway[rwy]})
+        assert all(_wake_ok(s, atc.own_class, own_runway) for s in slots)
     heavy = triangulate(make_row(DISTANCE="2100"))
     assert build_private(heavy, None, world, EMPTY).atc.own_class == "Heavy"
 
@@ -83,33 +89,38 @@ def test_atc_wake_classes(event, world, make_row) -> None:
 def test_atc_asks_the_world_for_slots_separated_for_its_own_class(event, world, make_row,
                                                                   monkeypatch) -> None:
     """ATC declares exactly the world's wake-separated free slots for its own class (3 near a storm)."""
-    calls: list[tuple[int, int, str]] = []
+    calls: list[tuple[int, int, str, str | None]] = []
     real = world.free_slots_after
 
-    def spy(t, n, view, own_class="Large"):
-        calls.append((t, n, own_class))
-        return real(t, n, view, own_class=own_class)
+    def spy(t, n, view, own_class="Large", runway=None):
+        calls.append((t, n, own_class, runway))
+        return real(t, n, view, own_class=own_class, runway=runway)
 
     monkeypatch.setattr(world, "free_slots_after", spy)
     heavy = triangulate(make_row(DISTANCE="2100"))
     atc = build_private(heavy, None, world, EMPTY).atc
-    assert calls == [(atc.first, 3, "Heavy")]
-    assert all(world.is_separated(s, "Heavy", EMPTY)[0] for s in atc.free_slots)
+    assert calls == [(atc.first, 3, "Heavy", "R1"), (atc.first, 3, "Heavy", "R2")]  # one call per runway
+    assert all(world.is_separated(s, "Heavy", EMPTY, runway=r)[0]
+               for r, slots in atc.free_by_runway.items() for s in slots)
 
 
 def test_traffic_classes_come_from_the_world(event, world) -> None:
     atc = build_private(event, None, world, EMPTY).atc
     assert atc.traffic_classes == {t: world.traffic_class(t) for t in atc.traffic}
+    for rwy, traffic in atc.traffic_by_runway.items():
+        assert traffic == {t: world.traffic_class(t, rwy) for t in traffic}
 
 
 def test_atc_demand_traffic_and_no_closure(calm_event, calm_world) -> None:
     atc = build_private(calm_event, None, calm_world, EMPTY).atc
     eta = to_min(calm_event.eta_landing)
     assert 3 <= atc.first - eta <= 8
-    assert len(atc.free_slots) == 4 and atc.closures == []
-    assert set(atc.demand) == set(atc.free_slots)
-    for i, slot in enumerate(atc.free_slots):
-        assert max(1, min(4, 4 - i)) <= atc.demand[slot] <= max(1, min(4, 5 - i))
+    assert atc.closures == [] and [len(v) for v in atc.free_by_runway.values()] == [4, 4]
+    for rwy, slots in atc.free_by_runway.items():  # demand ranks slots within their runway
+        assert set(atc.demand_by_runway[rwy]) == set(slots)
+        for i, slot in enumerate(slots):
+            assert max(1, min(4, 4 - i)) <= atc.demand_by_runway[rwy][slot] <= max(1, min(4, 5 - i))
+        assert sorted(atc.traffic_by_runway[rwy]) == calm_world.traffic_times(eta - 24, eta + 151, rwy)
     assert atc.traffic == calm_world.traffic_times(eta - 24, eta + 151)
 
 

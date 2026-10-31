@@ -293,7 +293,7 @@ class Dispatcher:
         end = min(start + constraints.min_turnaround(event.flight.dest), 1440)
         try:
             held = self.ledger.hold(eid, event.flight.dest.upper(), slot, gate, start, end,
-                                    wake_class=constraints.wake_class(event.distance))
+                                    wake_class=constraints.wake_class(event.distance), runway=pkg.get("runway"))
         except LedgerStateError as exc:  # the event already holds (a replayed --keep-ledger ledger)
             self._mark_manual(eid, f"hold refused, LedgerStateError: {exc}")
             return
@@ -311,7 +311,8 @@ class Dispatcher:
         self.status[eid] = "AWAITING_SIGNOFF"
         self.outcomes[eid] = OUTCOME_CONSENSUS if record.outcome == "CONSENSUS" else OUTCOME_FALLBACK
         self._emit("LEDGER", txt.hold_text(event.flight.code, record.outcome, pkg["slot"], gate, to_hhmm(start),
-                                           to_hhmm(end), constraints.min_turnaround(event.flight.dest)), event_id=eid,
+                                           to_hhmm(end), constraints.min_turnaround(event.flight.dest),
+                                           runway=pkg.get("runway")), event_id=eid,
                    payload={"op": "hold", "outcome": record.outcome, "reservations": [r.model_dump() for r in held],
                             "impact": self.assessments[eid].model_dump(mode="json")})
 

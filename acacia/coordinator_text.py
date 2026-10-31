@@ -44,7 +44,8 @@ def _wake_text(value: object) -> str:
 
 def _atc_text(k: ConstraintPacket) -> str:
     hard = _hard(k)
-    offers = ", ".join(o.value + (" (contested)" if (o.demand or 0) >= 3 else "") for o in k.options)
+    offers = ", ".join(o.value + (f" {o.runway}" if o.runway else "") + (" (contested)" if (o.demand or 0) >= 3 else "")
+                       for o in k.options)
     sep = (_wake_text(hard["WAKE_SEPARATION"]) if "WAKE_SEPARATION" in hard
            else f"{hard.get('MIN_SEPARATION_MIN', '?')} min separation")
     lead = hard.get("SLOT_LEAD")
@@ -98,7 +99,8 @@ def holding(event: DisruptionEvent, slot: str) -> tuple[int, float]:
 
 def send_text(event: DisruptionEvent, pkg: ResolutionPackage, turn: int) -> str:
     mins, kg = holding(event, pkg.slot)
-    return (f"Turn {turn} of {config.MAX_TURNS}. Sending `{pkg.package_id}` (land {pkg.slot}, gate "
+    on = f" on {pkg.runway}" if pkg.runway else ""
+    return (f"Turn {turn} of {config.MAX_TURNS}. Sending `{pkg.package_id}` (land {pkg.slot}{on}, gate "
             f"{pkg.gate}; holding {mins} min, {kg:,.0f} kg fuel) to all agents and to the checker.")
 
 
@@ -106,11 +108,12 @@ def solver_text(result: SolveResult, cuts: list[Cut]) -> str:
     top, n = result.top, len(result.all)
     disc = sum(c.status == "DISCARDED" for c in result.all)
     cut = sum(c.status == "CUT" for c in result.all)
-    text = f"Enumerated {n} slot x gate packages. Discarded {disc} on declared hard limits" + (
+    text = f"Enumerated {n} slot x runway x gate packages. Discarded {disc} on declared hard limits" + (
         f", {cut} by reject cuts" if cuts else "") + ". "
     if top is None:
         return text + "Feasible set is empty."
-    text += f"Top ranked: `{top.package_id}` {top.slot} + {top.gate}, score {top.score:.2f}"
+    text += f"Top ranked: `{top.package_id}` {top.slot}" + (f" {top.runway}" if top.runway else "") + (
+        f" + {top.gate}, score {top.score:.2f}")
     return text + (f" (corrupted: breaks {', '.join(result.corrupt_breaks)})." if result.corrupted else ".")
 
 

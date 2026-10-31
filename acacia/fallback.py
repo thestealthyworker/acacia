@@ -1,7 +1,8 @@
 """Deterministic rule-based fallback plan (HANDOVER 10). No AI involved.
 
-1. Slot: the earliest ATC free slot (first-come-first-served) at or after commit time + 5 min
-   (TIME-3). When the world is given, only slots still wake-separated on the live runway count
+1. Slot: the earliest ATC free slot across every arrival runway (first-come-first-served; ties
+   go to the lower runway id, CAP-9) at or after commit time + 5 min (TIME-3). When the world is
+   given, only slots still wake-separated on their own runway against the live ledger count
    (`world.is_separated`, CONSTRAINTS.md 2).
 2. If there is none, or it is past land_by: DIVERT to the nearest airport by haversine
    distance from the destination, excluding the destination, the origin and airports with
@@ -30,6 +31,7 @@ import pandas as pd
 
 from acacia import constraints
 from acacia.models import DisruptionEvent, EmptyLedgerView, FallbackPlan, LedgerView, PrivateState
+from acacia.runway import atc_slots
 from acacia.timeutil import to_hhmm
 
 if TYPE_CHECKING:
@@ -123,13 +125,15 @@ def _pick_gate(event: DisruptionEvent, private: PrivateState, gate_arr: int,
 
 
 def _separated_slots(event: DisruptionEvent, private: PrivateState, world: AirportWorld | None,
-                     view: LedgerView) -> list[int]:
-    """ATC free slots, earliest first, still wake-separated on the live runway when a world is given."""
-    slots = sorted(private.atc.free_slots)
+                     view: LedgerView) -> list[tuple[int, str | None]]:
+    """ATC free (slot, runway) pairs across runways, earliest first, still wake-separated on their
+    own runway against the live ledger when a world is given."""
+    slots = atc_slots(private.atc)
     if world is None or not hasattr(world, "is_separated"):
         return slots
-    own = private.atc.own_class
-    return [s for s in slots if world.is_separated(s, own, view, exclude_event=event.event_id)[0]]
+    own, me = private.atc.own_class, event.event_id
+    return [(s, r) for s, r in slots
+            if world.is_separated(s, own, view, exclude_event=me, **({} if r is None else {"runway": r}))[0]]
 
 
 def _pick_remote(event: DisruptionEvent, gate_arr: int, min_turn: int, view: LedgerView | None) -> str:
@@ -161,28 +165,33 @@ def plan_fallback(event: DisruptionEvent, private: PrivateState, airports_df: pd
     """
     view = ledger_view if ledger_view is not None else EmptyLedgerView()
     earliest = constraints.earliest_slot_min(event)  # TIME-3: never a slot already past at commit
-    slots = [s for s in _separated_slots(event, private, world, view) if s >= earliest]
+    pairs = [(s, r) for s, r in _separated_slots(event, private, world, view) if s >= earliest]
+    slots = [s for s, _ in pairs]
     land_by = private.pilot.land_by
     if not slots or slots[0] > land_by:
         return _divert(event, airports_df, _no_slot_reason(private, slots, land_by, earliest))
-    slot = slots[0]
-    for candidate in (s for s in slots if s <= land_by):
+    slot, runway = pairs[0]
+    for candidate, rwy in ((s, r) for s, r in pairs if s <= land_by):
         picked = _gate_for_slot(event, private, candidate, world, view, ledger_view)
         if picked is not None:
             gate, remote = picked
             later = "" if candidate == slot else (
                 f" Slot {to_hhmm(candidate)} instead of {to_hhmm(slot)} to meet the "
                 f"{constraints.GATE_CHANGE_NOTICE_MIN} min gate-change notice.")
-            return FallbackPlan(event_id=event.event_id, slot=to_hhmm(candidate), gate=gate,
-                                reason="First-come-first-served slot, " + _gate_text(private, gate, remote)
-                                       + later)
+            return FallbackPlan(event_id=event.event_id, slot=to_hhmm(candidate), gate=gate, runway=rwy,
+                                reason=f"First-come-first-served slot{_on(rwy)}, "
+                                       + _gate_text(private, gate, remote) + later)
     gate_arr = slot + event.taxi_in
     gate = _pick_gate(event, private, gate_arr, world, view) or _pick_remote(
         event, gate_arr, private.ground.min_turn, ledger_view)
-    return FallbackPlan(event_id=event.event_id, slot=to_hhmm(slot), gate=gate,
-                        reason=f"First-come-first-served slot; no gate meets the "
+    return FallbackPlan(event_id=event.event_id, slot=to_hhmm(slot), gate=gate, runway=runway,
+                        reason=f"First-come-first-served slot{_on(runway)}; no gate meets the "
                                f"{constraints.GATE_CHANGE_NOTICE_MIN} min gate-change notice "
                                "before the fuel limit.")
+
+
+def _on(runway: str | None) -> str:
+    return f" on {runway}" if runway else ""
 
 
 def _no_slot_reason(private: PrivateState, slots: list[int], land_by: int, earliest: int) -> str:

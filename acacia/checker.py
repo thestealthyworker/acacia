@@ -11,6 +11,10 @@ Workbook limits come from `acacia.constraints`: wake separation by leader/follow
 commit time (TIME-4). SLOT_LEAD re-derives commit time + 5 min from the event (TIME-3). SEPARATION checks the
 ATC's traffic snapshot and then `world.is_separated` against the world's traffic plus the live
 ledger (other events' held or committed slots), so a slot booked nearby after ATC declared fails.
+
+Per-runway model (CAP-9, WAKE-4 as given): both checks use the package's runway only, since wake
+separation applies between consecutive arrivals on the same runway. A package with no runway is
+checked against the merged stream of every runway (legacy, conservative).
 """
 
 from __future__ import annotations
@@ -22,9 +26,10 @@ from acacia.models import (
     RuleResult,
 )
 from acacia.timeutil import is_hhmm, to_hhmm, to_min
-from acacia.world import OTHER_EVENT_CLASS, AirportWorld, held_slot_class, separation_reach
+from acacia.runway import atc_has_slot, atc_traffic
+from acacia.world import AirportWorld, held_slot_class, separation_reach
 
-CHECKER_VERSION = "checker-0.5"
+CHECKER_VERSION = "checker-0.6"
 REMOTE_PREFIX = "REMOTE"
 
 
@@ -76,38 +81,48 @@ def _nearest(slot: int, traffic: dict[int, str]) -> dict[int, str]:
     return {t: traffic[t] for t in picks}
 
 
+def _on(runway: str | None) -> str:
+    return f" on {runway}" if runway else ""
+
+
 def check_separation(slot: int, private: PrivateState, world: AirportWorld | None = None,
-                     ledger_live: LedgerView | None = None,
-                     exclude_event: str | None = None) -> RuleResult:
-    """Free slot, wake minimum to the ATC's traffic, then the world's wake check (live ledger)."""
-    snapshot = _separation_snapshot(slot, private)
+                     ledger_live: LedgerView | None = None, exclude_event: str | None = None,
+                     runway: str | None = None) -> RuleResult:
+    """Free slot on `runway`, wake minimum to the ATC's traffic on that runway, then the world's
+    wake check on that runway against the live ledger (runway None: the merged stream)."""
+    known = getattr(world, "runways", None)
+    if runway is not None and callable(known) and runway not in known():
+        return _result(ReasonCode.SEPARATION, False,
+                       f"{runway} is not an arrival runway at {world.airport} (have {', '.join(known())}).")
+    snapshot = _separation_snapshot(slot, private, runway)
     if not snapshot.passed or world is None or not hasattr(world, "is_separated"):
         return snapshot
     own = private.atc.own_class
+    kw = {} if runway is None else {"runway": runway}
     ok, detail = world.is_separated(slot, own, ledger_live or EmptyLedgerView(),
-                                    exclude_event=exclude_event)
+                                    exclude_event=exclude_event, **kw)
     if not ok:
         return _result(ReasonCode.SEPARATION, False,
-                       f"{to_hhmm(slot)} breaks wake separation ({own}) on the live runway: {detail}.")
+                       f"{to_hhmm(slot)}{_on(runway)} breaks wake separation ({own}) on the live runway: {detail}.")
     return _result(ReasonCode.SEPARATION, True, snapshot.detail.rstrip(".") + f"; live runway {detail}.")
 
 
-def _separation_snapshot(slot: int, private: PrivateState) -> RuleResult:
+def _separation_snapshot(slot: int, private: PrivateState, runway: str | None = None) -> RuleResult:
     atc = private.atc
-    if slot not in atc.free_slots:
-        free = ", ".join(to_hhmm(s) for s in sorted(atc.free_slots)) or "none"
+    if not atc_has_slot(atc, slot, runway):
+        listed = atc.free_by_runway.get(runway, []) if runway and atc.free_by_runway else atc.free_slots
+        free = ", ".join(to_hhmm(s) for s in sorted(listed)) or "none"
         return _result(ReasonCode.SEPARATION, False,
-                       f"{to_hhmm(slot)} is not an ATC free slot (free: {free}).")
-    traffic = {t: atc.traffic_classes.get(t, OTHER_EVENT_CLASS) for t in atc.traffic}
-    near = _nearest(slot, traffic)
+                       f"{to_hhmm(slot)} is not an ATC free slot{_on(runway)} (free: {free}).")
+    near = _nearest(slot, atc_traffic(atc, runway))
     violation = _wake_violation(slot, atc.own_class, near)
     if violation:
         return _result(ReasonCode.SEPARATION, False,
-                       f"{to_hhmm(slot)} breaks wake separation with traffic at {violation}.")
+                       f"{to_hhmm(slot)}{_on(runway)} breaks wake separation with traffic at {violation}.")
     gap = min((abs(slot - t) for t in near), default=None)
     gap_text = f"nearest traffic {gap} min away" if gap is not None else "no traffic nearby"
     return _result(ReasonCode.SEPARATION, True,
-                   f"{to_hhmm(slot)} is a free slot; {gap_text}, wake table met ({atc.own_class}).")
+                   f"{to_hhmm(slot)}{_on(runway)} is a free slot; {gap_text}, wake table met ({atc.own_class}).")
 
 
 def check_fuel(slot: int, private: PrivateState) -> RuleResult:
@@ -172,17 +187,18 @@ def check_crew(slot: int, event: DisruptionEvent, private: PrivateState) -> Rule
 
 
 def check_resources(slot: int, gate: str, event: DisruptionEvent, private: PrivateState,
-                    ledger_live: LedgerView, airport: str) -> RuleResult:
-    """Live ledger: no other event's runway slot inside the wake minimum, no gate overlap."""
+                    ledger_live: LedgerView, airport: str, runway: str | None = None) -> RuleResult:
+    """Live ledger: no other event's slot on the same runway inside the wake minimum (any runway
+    when runway is None), no gate overlap."""
     me = event.event_id
     reach = wake_reach()
-    classes = {t: held_slot_class(ledger_live, airport, t, exclude_event=me)
+    classes = {t: held_slot_class(ledger_live, airport, t, exclude_event=me, runway=runway)
                for t in range(slot - reach, slot + reach + 1)}
     held = {t: cls for t, cls in classes.items() if cls is not None}
     violation = _wake_violation(slot, private.atc.own_class, held)
     if violation:
         return _result(ReasonCode.RESOURCE_CONFLICT, False,
-                       f"runway slot {violation} at {airport} is booked by another event "
+                       f"runway slot {violation}{_on(runway)} at {airport} is booked by another event "
                        f"inside the wake minimum of {to_hhmm(slot)}.")
     start = slot + event.taxi_in
     end = start + private.ground.min_turn
@@ -232,13 +248,13 @@ def check(package: ResolutionPackage, event: DisruptionEvent, private: PrivateSt
     if not is_hhmm(package.slot):
         raise ValueError(f"package slot must be 'HH:MM', got {package.slot!r}")
     airport = (airport or event.flight.dest).upper()
-    slot, gate = to_min(package.slot), package.gate
+    slot, gate, runway = to_min(package.slot), package.gate, package.runway
     rules = [
-        check_separation(slot, private, world, ledger_live, exclude_event=event.event_id),
+        check_separation(slot, private, world, ledger_live, exclude_event=event.event_id, runway=runway),
         check_fuel(slot, private),
         check_gate(slot, gate, event, private, world),
         check_crew(slot, event, private),
-        check_resources(slot, gate, event, private, ledger_live, airport),
+        check_resources(slot, gate, event, private, ledger_live, airport, runway=runway),
         check_gate_change_notice(slot, gate, event, private),
         check_slot_lead(slot, event),
     ]

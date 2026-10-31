@@ -310,7 +310,7 @@ class _Run:
                              f"to `COMMITTED` in {self.turn} turns.", "COMMITTED", 5,
                              payload={"package_id": top.package_id})
             return
-        self.tried.add(package_key(top.slot, top.gate))
+        self.tried.add(package_key(top.slot, top.gate, top.runway))
         for d in rejects:
             if any(d is t for t in self.timeout_rejects):
                 continue  # a timeout reject adds no cut; the package is marked tried

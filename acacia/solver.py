@@ -12,11 +12,15 @@ weighted score, which sums the POLICY keys only.
 
 TIME-3/4: a slot before the ATC's declared A_H3 SLOT_LEAD earliest slot is discarded SLOT_LEAD,
 and the G_H3 gate-change notice counts from the declared commit_time.
+
+CAP-9: packages are slot x runway x gate, where (slot, runway) pairs come only from the ATC's
+declared SLOT options (`Option.runway`; None for a legacy option). Every package carries its
+runway; tried keys and SLOT / PACKAGE cuts are per runway.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -28,7 +32,7 @@ from acacia.models import (
 )
 from acacia.timeutil import is_hhmm, to_hhmm, to_min
 
-SOLVER_VERSION = "solver-0.4"
+SOLVER_VERSION = "solver-0.5"
 FUEL_SPAN_MIN = SPARE_HOLDING_MIN  # FUEL-5: used when the Pilot declares no earliest landing
 CONNECTION_SPAN_MIN = 30
 OVERTIME_SPAN_MIN = 60
@@ -42,8 +46,9 @@ Status = Literal["FEASIBLE", "DISCARDED", "CUT", "TRIED", "CORRUPTED"]
 class Cut(BaseModel):
     """A constraint added after a REJECT (HANDOVER 7.5 soft cuts, PLAN 3.2 hard cuts).
 
-    SOFT: utility on `pref` must be strictly above `min_utility`. SLOT: exclude `slot`.
-    GATE: exclude `gate`. SLOT_FROM: exclude `slot` and later. PACKAGE: exclude slot+gate.
+    SOFT: utility on `pref` must be strictly above `min_utility`. SLOT: exclude `slot` (on
+    `runway` when set). GATE: exclude `gate`. SLOT_FROM: exclude `slot` and later (any runway).
+    PACKAGE: exclude slot+gate (on `runway` when set).
     """
 
     kind: Literal["SOFT", "SLOT", "GATE", "SLOT_FROM", "PACKAGE"]
@@ -53,6 +58,7 @@ class Cut(BaseModel):
     min_utility: float | None = None
     slot: HHMM | None = None
     gate: str | None = None
+    runway: str | None = None  # CAP-9: SLOT / PACKAGE cuts apply on this runway only
 
 
 class Candidate(BaseModel):
@@ -75,7 +81,7 @@ class _Decl:
     """Everything the solver reads, parsed from the declared packets."""
 
     event_id: str
-    slots: tuple[tuple[int, int], ...]  # (slot, demand)
+    slots: tuple[tuple[int, int, str | None], ...]  # (slot, demand, runway)
     gates: tuple[str, ...]
     land_by: int | None
     gate_free: dict[str, int | None]  # None = unavailable
@@ -88,11 +94,12 @@ class _Decl:
     eta: int | None = None  # Pilot fact "eta" (earliest landing E)
     burn_kg_per_h: float | None = None  # Pilot fact "burn_kg_per_h" (holding burn)
     earliest_slot: int | None = None  # A_H3 SLOT_LEAD: commit time + slot lead (TIME-3)
+    runway_traffic: dict[str, tuple[int, ...]] = field(default_factory=dict)  # ATC "traffic_by_runway"
 
 
-def package_key(slot: str, gate: str) -> str:
-    """Key of a tried package: "HH:MM|gate"."""
-    return f"{slot}|{gate}"
+def package_key(slot: str, gate: str, runway: str | None = None) -> str:
+    """Key of a tried package: "HH:MM|gate", or "HH:MM|runway|gate" with a runway (CAP-9)."""
+    return f"{slot}|{gate}" if runway is None else f"{slot}|{runway}|{gate}"
 
 
 def _hard(packet: ConstraintPacket | None, rule: str) -> object:
@@ -110,7 +117,8 @@ def _parse(packets: dict[AgentRole, ConstraintPacket]) -> _Decl:
     prefs = {s.id: (s.metric, p.agent.value, s.target) for p in packets.values() for s in p.soft}
     return _Decl(
         event_id=any_packet.event_id if any_packet else "",
-        slots=tuple((to_min(o.value), o.demand or 1) for o in (atc.options if atc else []) if o.type == "SLOT"),
+        slots=tuple((to_min(o.value), o.demand or 1, o.runway)
+                    for o in (atc.options if atc else []) if o.type == "SLOT"),
         gates=tuple(o.value for o in (gr.options if gr else []) if o.type == "GATE"),
         land_by=to_min(land_by) if isinstance(land_by, str) else None,
         gate_free={g: (None if v == "unavailable" else to_min(v)) for g, v in dict(free_raw).items()},
@@ -123,7 +131,16 @@ def _parse(packets: dict[AgentRole, ConstraintPacket]) -> _Decl:
         eta=_fact_time(pil, "eta"),
         burn_kg_per_h=_fact_number(pil, "burn_kg_per_h"),
         earliest_slot=_earliest_slot(_hard(atc, "SLOT_LEAD")),
+        runway_traffic=_runway_traffic(atc),
     )
+
+
+def _runway_traffic(atc: ConstraintPacket | None) -> dict[str, tuple[int, ...]]:
+    """ATC's declared traffic per runway (facts_owned "traffic_by_runway"); malformed entries skipped."""
+    raw = (atc.facts_owned if atc else {}).get("traffic_by_runway")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(r): tuple(to_min(t) for t in v if is_hhmm(t)) for r, v in raw.items() if isinstance(v, list)}
 
 
 def _fact_time(packet: ConstraintPacket | None, key: str) -> int | None:
@@ -261,17 +278,16 @@ def _breakdown(d: _Decl, utils: dict[str, float]) -> dict[str, float]:
 
 
 # --- step 5: cuts ----------------------------------------------------------------------------
-def _cut_hit(cut: Cut, slot: int, gate: str, utils: dict[str, float]) -> bool:
+def _cut_hit(cut: Cut, slot: int, gate: str, utils: dict[str, float], runway: str | None = None) -> bool:
     if cut.kind == "SOFT":
         u = utils.get(cut.pref or "")
         return u is not None and cut.min_utility is not None and not u > cut.min_utility
-    if cut.kind == "SLOT":
-        return cut.slot is not None and slot == to_min(cut.slot)
     if cut.kind == "GATE":
         return gate == cut.gate
     if cut.kind == "SLOT_FROM":
         return cut.slot is not None and slot >= to_min(cut.slot)
-    return cut.slot is not None and slot == to_min(cut.slot) and gate == cut.gate
+    same_slot = cut.slot is not None and slot == to_min(cut.slot) and cut.runway in (None, runway)
+    return same_slot if cut.kind == "SLOT" else same_slot and gate == cut.gate
 
 
 _HARD_CUT_KIND = {"A_H1": "SLOT", "A_H3": "SLOT", "G_H1": "GATE", "P_H1": "SLOT_FROM", "G_H2": "SLOT_FROM",
@@ -290,37 +306,38 @@ def cut_from_reject(decision: Decision, package: ResolutionPackage,
     if cites in soft:
         d = _parse(packets)
         slot = to_min(package.slot)
-        demand = dict(d.slots).get(slot, 1)
+        demand = next((dm for s, dm, r in d.slots if s == slot and r == package.runway), 1)
         utils = _utilities(d, slot, demand, package.gate, taxi_in)
         return Cut(kind="SOFT", pref=cites, min_utility=utils.get(cites, 0.0), **base)
     kind = _HARD_CUT_KIND.get(cites, "PACKAGE")
     return Cut(kind=kind, slot=package.slot, gate=package.gate if kind in ("GATE", "PACKAGE") else None,
-               **base)
+               runway=package.runway if kind in ("SLOT", "PACKAGE") else None, **base)
 
 
 # --- steps 1, 4 and 6: enumerate, score, rank ---------------------------------------------------
 def _enumerate(d: _Decl, taxi_in: int, turn: int, cuts: list[Cut], tried: set[str]) -> list[Candidate]:
     out: list[Candidate] = []
     n = 0
-    for slot, demand in d.slots:
+    for slot, demand, runway in d.slots:  # slot x runway pairs as declared, then x gate
         for gate in d.gates:
             n += 1
-            out.append(_candidate(d, f"P{n}", slot, demand, gate, taxi_in, turn, cuts, tried))
+            out.append(_candidate(d, f"P{n}", (slot, demand, runway), gate, taxi_in, turn, cuts, tried))
     return out
 
 
-def _candidate(d: _Decl, pid: str, slot: int, demand: int, gate: str, taxi_in: int, turn: int,
-               cuts: list[Cut], tried: set[str]) -> Candidate:
+def _candidate(d: _Decl, pid: str, option: tuple[int, int, str | None], gate: str, taxi_in: int,
+               turn: int, cuts: list[Cut], tried: set[str]) -> Candidate:
+    slot, demand, runway = option
     utils = _utilities(d, slot, demand, gate, taxi_in)
     bd = _breakdown(d, utils)
     why = _discard(d, slot, gate, taxi_in)
     score = round(sum(bd.values()), 6)  # weighted POLICY keys only
     pkg = ResolutionPackage(event_id=d.event_id, package_id=pid, turn=turn, slot=to_hhmm(slot),
-                            gate=gate, score=score, score_breakdown={**bd, **_info(d, slot, slot + taxi_in)},
-                            satisfies_hard=not why)
-    cut = next((c for c in cuts if _cut_hit(c, slot, gate, utils)), None)
+                            gate=gate, runway=runway, score=score,
+                            score_breakdown={**bd, **_info(d, slot, slot + taxi_in)}, satisfies_hard=not why)
+    cut = next((c for c in cuts if _cut_hit(c, slot, gate, utils, runway)), None)
     status: Status = "DISCARDED" if why else "CUT" if cut else (
-        "TRIED" if package_key(pkg.slot, gate) in tried else "FEASIBLE")
+        "TRIED" if package_key(pkg.slot, gate, runway) in tried else "FEASIBLE")
     return Candidate(package=pkg, utilities=utils, discard=why, status=status,
                      cut_by=cut.cites if cut and not why else None)
 
@@ -351,9 +368,10 @@ def _corrupt(d: _Decl, result: SolveResult, taxi_in: int) -> SolveResult:
                                           "corrupt_breaks": [r.value for r in bad.discard]})
     if result.top is None:
         return result
-    slot = to_min(result.top.slot)
-    declared = {s for s, _ in d.slots}
-    later = sorted(t for t in d.traffic if t > slot and t not in declared)
+    slot, runway = to_min(result.top.slot), result.top.runway
+    declared = {s for s, _, r in d.slots if r == runway}
+    traffic = d.runway_traffic.get(runway, d.traffic) if runway is not None else d.traffic
+    later = sorted(t for t in traffic if t > slot and t not in declared)
     occupied = later[0] if later else slot + CORRUPT_NUDGE_MIN
     moved = result.top.model_copy(update={
         "package_id": result.top.package_id + "x", "slot": to_hhmm(occupied), "satisfies_hard": True})

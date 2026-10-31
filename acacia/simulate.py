@@ -6,7 +6,10 @@ shared `AirportWorld`, filtered through a `LedgerView`, so events at the same ai
 for the same slots and gates. Workbook limits (wake table, turnaround, spare gates, fuel) come
 only from `acacia.constraints`.
 
-Draw order (fixed, so runs repeat): queue rand(3..8); demand rand(0..1) per free slot; pax;
+ATC slots are per arrival runway (CAP-9): up to 3 or 4 wake-separated free slots on each runway.
+
+Draw order (fixed, so runs repeat): queue rand(3..8); demand rand(0..1) per free slot (runway
+order, then slot order); pax;
 connect_by rand(28..55); assigned gate choice; shift rand(25..85); next_departure rand(20..60).
 Under tight_crew the drawn shift is replaced by first offered slot + Ti + min_turn -
 constraints.TIGHT_CREW_SLACK_MIN (KIT-6), so overtime at the earliest slot sits between the
@@ -70,17 +73,34 @@ def _closure_near(world: AirportWorld, eta: int, first: int) -> bool:
     return any(start <= first and eta < end for start, end in world.closures())
 
 
-# --- runway: traffic and wake separation (CONSTRAINTS.md 2) -----------------------------------
-def _neighbours(world: AirportWorld, view: LedgerView, start: int, end: int) -> dict[int, str]:
-    """Traffic (seeded wake class) and other events' held slots (stored class, WAKE-7) in [start, end)."""
+# --- runway: per-runway slots, traffic and wake separation (CONSTRAINTS.md 2, CAP-9) -----------
+def _neighbours(world: AirportWorld, view: LedgerView, start: int, end: int, runway: str) -> dict[int, str]:
+    """Traffic (seeded wake class) and other events' held slots (stored class, WAKE-7) on
+    `runway` in [start, end)."""
     start, end = max(0, start), min(config.MINUTES_PER_DAY, end)
-    out = {t: world.traffic_class(t) or OTHER_EVENT_CLASS for t in world.traffic_times(start, end)}
-    for p in world.grid():
-        if start <= p < end and p not in out:
-            cls = held_slot_class(view, world.airport, p)
-            if cls is not None:
-                out[p] = cls
+    out = {t: world.traffic_class(t, runway) or OTHER_EVENT_CLASS
+           for t in world.traffic_times(start, end, runway)}
+    for t in range(start, end):
+        if t not in out and (cls := held_slot_class(view, world.airport, t, runway=runway)) is not None:
+            out[t] = cls
     return out
+
+
+def _demand(slots: dict[str, list[int]], rng: random.Random) -> dict[str, dict[int, int]]:
+    """Per runway, slot i (0 = earliest on that runway) gets demand 4 - i + rand(0..1) in 1..4;
+    drawn in runway order, then slot order."""
+    return {rwy: {slot: max(DEMAND_MIN, min(DEMAND_MAX, DEMAND_MAX - i + rng.randint(0, 1)))
+                  for i, slot in enumerate(times)}
+            for rwy, times in slots.items()}
+
+
+def _merged(by_runway: dict[str, dict[int, object]]) -> dict[int, object]:
+    """Legacy single-stream view: each time once, with the value of the first runway that has it."""
+    out: dict[int, object] = {}
+    for values in by_runway.values():
+        for t, v in values.items():
+            out.setdefault(t, v)
+    return dict(sorted(out.items()))
 
 
 def _atc(event: DisruptionEvent, world: AirportWorld, view: LedgerView, rng: random.Random) -> AtcPrivate:
@@ -90,18 +110,18 @@ def _atc(event: DisruptionEvent, world: AirportWorld, view: LedgerView, rng: ran
     closure = _closure_near(world, eta, first)
     own = constraints.wake_class(event.distance)
     count = SLOTS_WITH_CLOSURE if closure else SLOTS_WITHOUT_CLOSURE
-    slots = world.free_slots_after(first, count, view, own_class=own)  # wake-separated only
-    demand = {
-        slot: max(DEMAND_MIN, min(DEMAND_MAX, DEMAND_MAX - i + rng.randint(0, 1)))
-        for i, slot in enumerate(slots)
-    }
+    slots = {rwy: world.free_slots_after(first, count, view, own_class=own, runway=rwy)
+             for rwy in world.runways()}  # wake-separated on their own runway only
+    demand = _demand(slots, rng)
     reach = separation_reach()
-    window_end = max([eta + TRAFFIC_AFTER_E, *(s + reach for s in slots)])
-    traffic = _neighbours(world, view, eta - TRAFFIC_BEFORE_E, window_end + 1)
+    window_end = max([eta + TRAFFIC_AFTER_E, *(s + reach for times in slots.values() for s in times)])
+    traffic = {rwy: _neighbours(world, view, eta - TRAFFIC_BEFORE_E, window_end + 1, rwy) for rwy in slots}
     closures = [(s, e) for s, e in world.closures() if s <= window_end and eta - TRAFFIC_BEFORE_E < e]
-    return AtcPrivate(first=first, free_slots=slots, demand=demand, traffic=sorted(traffic),
-                      closures=closures, min_separation=config.MIN_SEPARATION, own_class=own,
-                      traffic_classes=dict(sorted(traffic.items())))
+    merged_traffic = _merged(traffic)
+    return AtcPrivate(first=first, free_slots=sorted({s for times in slots.values() for s in times}),
+                      demand=_merged(demand), traffic=sorted(merged_traffic), closures=closures,
+                      min_separation=config.MIN_SEPARATION, own_class=own, traffic_classes=merged_traffic,
+                      free_by_runway=slots, demand_by_runway=demand, traffic_by_runway=traffic)
 
 
 # --- pilot (CONSTRAINTS.md 4) -------------------------------------------------------------------
