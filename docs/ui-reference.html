@@ -1,0 +1,670 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>
+<title>Acacia Negotiation Console</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: ops console. Left = flight strips + analysis dashboard, right = live agent channel. Strip-board vocabulary from ATC flight progress strips. */
+:root{
+  --bg:#e9edf0; --panel:#ffffff; --panel2:#f4f6f8; --ink:#14202a; --muted:#5a6a77; --line:#d3dbe1; --line2:#e4e9ed;
+  --accent:#0d6d86; --accent-soft:#d8eef3; --strip:#f7e7b9; --strip-ink:#4a3a0c;
+  --atc:#0d7f8f; --pilot:#4a4fc2; --ground:#ad5f17; --coord:#3a4652; --solver:#6b5a8e; --checker:#1d7f49; --human:#8a3b6b; --builder:#5a6a77;
+  --good:#1d7f49; --good-soft:#dcf1e4; --bad:#bf3b2b; --bad-soft:#f8e0dc; --warn:#a86b0e; --warn-soft:#f6ead2;
+  --display:"Barlow Condensed","Arial Narrow",Arial,sans-serif; --body:"Barlow","Segoe UI",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0d1317; --panel:#141c22; --panel2:#18222a; --ink:#e3eaef; --muted:#8fa0ad; --line:#26333c; --line2:#1e2a32;
+  --accent:#4cc0d9; --accent-soft:#12323b; --strip:#3a3216; --strip-ink:#f1dfa4;
+  --atc:#4cc3cf; --pilot:#9a9ef2; --ground:#e3a15a; --coord:#a9b6c1; --solver:#b9a6df; --checker:#5fcf8e; --human:#e08ab9; --builder:#8fa0ad;
+  --good:#5fcf8e; --good-soft:#123222; --bad:#f08a7a; --bad-soft:#3a1c18; --warn:#e5b157; --warn-soft:#352812; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0d1317; --panel:#141c22; --panel2:#18222a; --ink:#e3eaef; --muted:#8fa0ad; --line:#26333c; --line2:#1e2a32;
+  --accent:#4cc0d9; --accent-soft:#12323b; --strip:#3a3216; --strip-ink:#f1dfa4;
+  --atc:#4cc3cf; --pilot:#9a9ef2; --ground:#e3a15a; --coord:#a9b6c1; --solver:#b9a6df; --checker:#5fcf8e; --human:#e08ab9; --builder:#8fa0ad;
+  --good:#5fcf8e; --good-soft:#123222; --bad:#f08a7a; --bad-soft:#3a1c18; --warn:#e5b157; --warn-soft:#352812; color-scheme:dark}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:14px;line-height:1.45}
+button,select,input{font:inherit;color:inherit}
+.app{height:100%;display:grid;grid-template-rows:auto 1fr}
+header.top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding-block:10px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap;min-width:0}
+.brand h1{font-family:var(--display);font-weight:700;font-size:22px;letter-spacing:.02em;margin:0;text-transform:uppercase}
+.brand span{color:var(--muted);font-size:12.5px}
+.top .spacer{flex:1}
+.ctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.btn{border:1px solid var(--line);background:var(--panel2);border-radius:6px;padding:5px 10px;cursor:pointer;font-weight:600;font-size:13px}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--panel)}
+.btn:focus-visible,.strip:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.toggle{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:4px 8px;background:var(--panel2);cursor:pointer}
+.toggle input{accent-color:var(--accent)}
+select{border:1px solid var(--line);background:var(--panel2);border-radius:6px;padding:4px 6px;font-size:13px}
+main.split{min-height:0;display:grid;grid-template-columns:minmax(0,1.45fr) minmax(0,1fr)}
+.left{min-height:0;overflow:auto;padding-block:16px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:16px;display:flex;flex-direction:column;gap:14px}
+.right{min-height:0;display:grid;grid-template-rows:auto auto 1fr auto;background:var(--panel);border-left:1px solid var(--line)}
+.sec{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+.sec h2{font-family:var(--display);font-weight:600;font-size:14px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;display:flex;align-items:center;gap:8px}
+.sec h2 .count{font-family:var(--mono);font-size:11.5px;letter-spacing:0}
+/* flight strips */
+.board-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.board-tools input[type=search]{flex:1;min-width:160px;border:1px solid var(--line);background:var(--panel2);border-radius:6px;padding:5px 8px}
+.filebtn{position:relative;overflow:hidden}
+.filebtn input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.strips{display:flex;flex-direction:column;gap:6px;max-height:232px;overflow:auto;padding-right:2px}
+.strip{display:grid;grid-template-columns:62px 1fr auto;align-items:stretch;border:1px solid var(--line);border-radius:4px;background:var(--panel2);cursor:pointer;text-align:left;padding:0;min-width:0}
+.strip .cs{background:var(--strip);color:var(--strip-ink);font-family:var(--mono);font-weight:600;font-size:12.5px;display:flex;flex-direction:column;justify-content:center;align-items:center;border-right:1px dashed var(--line);padding:6px 4px}
+.strip .cs small{font-weight:400;font-size:10.5px;opacity:.8}
+.strip .mid{padding:6px 10px;min-width:0}
+.strip .route{font-family:var(--mono);font-weight:600;font-size:13px}
+.strip .meta{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.strip .end{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:4px;padding:6px 10px}
+.strip[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+.chip{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:11px;font-weight:600;padding:1px 6px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.chip.weather{color:var(--accent)} .chip.knock{color:var(--ground)} .chip.combined{color:var(--pilot)}
+.chip.sim{color:var(--warn);border-style:dashed}
+.chip.good{color:var(--good);background:var(--good-soft);border-color:transparent}
+.chip.bad{color:var(--bad);background:var(--bad-soft);border-color:transparent}
+.chip.warn{color:var(--warn);background:var(--warn-soft);border-color:transparent}
+.delay{font-family:var(--mono);font-weight:600;font-size:13px}
+.empty{color:var(--muted);font-size:13px;padding:8px 2px}
+/* event card */
+.event-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:14px}
+.ev-title{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.ev-title .big{font-family:var(--display);font-weight:700;font-size:28px;letter-spacing:.02em}
+.ev-title .sub{color:var(--muted)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:13px;margin-top:8px}
+.kv dt{color:var(--muted)} .kv dd{margin:0;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.causebar{display:flex;height:14px;border-radius:3px;overflow:hidden;background:var(--line2);margin:6px 0 4px}
+.causebar span{display:block;height:100%}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.inject{margin-top:8px;border:1px dashed var(--warn);color:var(--warn);background:var(--warn-soft);border-radius:6px;padding:6px 8px;font-size:12.5px}
+/* stages */
+.stages{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}
+.stage{border:1px solid var(--line);border-radius:6px;padding:6px 8px;background:var(--panel2);min-width:0}
+.stage b{display:block;font-family:var(--display);font-size:13px;letter-spacing:.03em;text-transform:uppercase;overflow-wrap:anywhere;line-height:1.2}
+.stage small{color:var(--muted);font-size:11.5px}
+.stage.ai{border-style:solid}
+.stage.done{border-color:var(--good);background:var(--good-soft)}
+.stage.active{border-color:var(--accent);background:var(--accent-soft)}
+.turnrow{display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:12.5px;color:var(--muted);gap:8px;flex-wrap:wrap}
+.turns{display:flex;gap:4px}
+.turns span{width:26px;height:8px;border-radius:2px;background:var(--line)}
+.turns span.on{background:var(--accent)}
+.state{font-family:var(--mono);font-size:12px;color:var(--ink)}
+/* agents */
+.agents{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.agent{border:1px solid var(--line);border-top:3px solid var(--c);border-radius:8px;padding:8px 10px;background:var(--panel2);min-width:0}
+.agent .who{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px}
+.agent .who b{font-family:var(--display);font-size:15px;letter-spacing:.04em;text-transform:uppercase;color:var(--c)}
+.agent ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:12.5px}
+.agent li{display:grid;grid-template-columns:44px 1fr;gap:6px;align-items:start}
+.agent li .tag{font-family:var(--mono);font-size:10.5px;font-weight:600;color:var(--muted);padding-top:1px}
+.agent li.hard .tag{color:var(--bad)}
+.agent .wait{color:var(--muted);font-size:12.5px;font-style:italic}
+.agent .vote{margin-top:8px;padding-top:6px;border-top:1px dashed var(--line);font-size:12.5px}
+.private{font-size:11px;color:var(--muted);margin-top:6px}
+/* packages */
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line2);white-space:nowrap}
+th{font-family:var(--display);font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-size:12px}
+td.mono{font-family:var(--mono)}
+tr.discard td{color:var(--muted)}
+tr.discard td.why{color:var(--bad)}
+tr.pick td{background:var(--accent-soft)}
+.bars{display:flex;height:9px;width:120px;border-radius:2px;overflow:hidden;background:var(--line2)}
+.bars span{height:100%}
+/* timeline */
+.tl svg{display:block;width:100%;height:auto;min-width:560px}
+.tl .axis{stroke:var(--line)} .tl .grid{stroke:var(--line2)}
+.tl text{fill:var(--muted);font-family:var(--mono);font-size:10.5px}
+.tl .lane{fill:var(--ink);font-family:var(--body);font-size:11.5px;font-weight:600}
+/* outcome */
+.outcome{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.stat{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--panel2);min-width:0}
+.stat small{display:block;color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;font-family:var(--display)}
+.stat b{font-family:var(--mono);font-size:18px;font-variant-numeric:tabular-nums}
+.signoff{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;font-size:13px}
+/* right: channel */
+.ch-head{padding:12px 16px 8px;padding-right:max(16px,env(safe-area-inset-right,0px));border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.ch-head h2{font-family:var(--display);font-weight:700;font-size:17px;letter-spacing:.06em;text-transform:uppercase;margin:0;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.ch-head .sub{font-size:12px;color:var(--muted)}
+.filters{display:flex;gap:6px;flex-wrap:wrap}
+.fchip{font-size:11.5px;font-weight:600;border:1px solid var(--line);border-radius:999px;padding:2px 9px;background:var(--panel2);cursor:pointer;color:var(--c)}
+.fchip[aria-pressed="false"]{opacity:.45}
+.player{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:8px 16px;padding-right:max(16px,env(safe-area-inset-right,0px));border-bottom:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+.feed{min-height:0;overflow:auto;padding:14px 16px;padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:10px;background:var(--panel2)}
+.msg{display:grid;grid-template-columns:30px 1fr;gap:9px;min-width:0;animation:in .25s ease-out}
+@keyframes in{from{transform:translateY(4px);opacity:.3}to{transform:none;opacity:1}}
+@media (prefers-reduced-motion:reduce){.msg{animation:none}}
+.av{width:30px;height:30px;border-radius:7px;background:var(--c);color:var(--panel);display:grid;place-items:center;font-family:var(--display);font-weight:700;font-size:12px;letter-spacing:.03em}
+.bubble{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--c);border-radius:8px;padding:7px 10px;min-width:0}
+.bubble.note{background:transparent;border-style:dashed;border-left-style:solid}
+.mh{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;margin-bottom:3px}
+.mh b{color:var(--c);font-weight:700}
+.mh .type{font-family:var(--mono);font-size:10.5px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 5px}
+.mh .t{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.mtext{font-size:13.5px;overflow-wrap:anywhere}
+.mtext code{font-family:var(--mono);font-size:12px;background:var(--panel2);padding:0 3px;border-radius:3px}
+details.payload{margin-top:5px}
+details.payload summary{cursor:pointer;font-size:11.5px;color:var(--accent);font-weight:600}
+details.payload pre{margin:5px 0 0;font-family:var(--mono);font-size:11px;line-height:1.45;background:var(--panel2);border:1px solid var(--line2);border-radius:6px;padding:7px;overflow:auto;max-height:260px}
+.hash{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:4px}
+.typing{display:flex;gap:9px;align-items:center;font-size:12.5px;color:var(--muted)}
+.dots span{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--muted);margin-right:3px;animation:b 1s infinite}
+.dots span:nth-child(2){animation-delay:.15s}.dots span:nth-child(3){animation-delay:.3s}
+@keyframes b{0%,100%{opacity:.25}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.dots span{animation:none}}
+.ch-foot{border-top:1px solid var(--line);padding:8px 16px;padding-right:max(16px,env(safe-area-inset-right,0px));font-size:11.5px;color:var(--muted);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.foot-note{font-size:11.5px;color:var(--muted)}
+@media (max-width:980px){
+  html,body{height:auto}
+  .app{height:auto}
+  main.split{grid-template-columns:minmax(0,1fr)}
+  .left{overflow:visible;padding-right:max(16px,env(safe-area-inset-right,0px))}
+  .right{border-left:0;border-top:1px solid var(--line);grid-template-rows:auto auto minmax(420px,70vh) auto}
+  .ch-head,.player,.feed,.ch-foot{padding-left:max(16px,env(safe-area-inset-left,0px))}
+}
+@media (max-width:640px){
+  .event-grid{grid-template-columns:1fr}
+  .agents{grid-template-columns:1fr}
+  .stages{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .outcome{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+</style>
+
+<div class="app">
+<header class="top">
+  <div class="brand"><h1>Acacia Negotiation Console</h1><span>ATC · Pilot · Ground agents, deterministic safety layer</span></div>
+  <div class="spacer"></div>
+  <div class="ctl" role="group" aria-label="Scenario stress tests">
+    <label class="toggle" for="stressFuel"><input type="checkbox" id="stressFuel"> Low fuel</label>
+    <label class="toggle" for="stressCrew"><input type="checkbox" id="stressCrew"> Tight crew</label>
+    <label class="toggle" for="stressCorrupt"><input type="checkbox" id="stressCorrupt"> Corrupt solver (safety test)</label>
+  </div>
+</header>
+
+<main class="split">
+  <section class="left" aria-label="Dashboard">
+    <div class="sec">
+      <h2>Disrupted flights <span class="count" id="boardCount"></span></h2>
+      <div class="board-tools">
+        <input type="search" id="search" placeholder="Search flight, airport or date (e.g. DL1639, ATL, 2015-02-26)" aria-label="Search flights">
+        <span class="btn filebtn">Load flights.csv<input type="file" id="fileFlights" accept=".csv,text/csv" aria-label="Load flights.csv"></span>
+        <span class="btn filebtn">Load airports.csv<input type="file" id="fileAirports" accept=".csv,text/csv" aria-label="Load airports.csv"></span>
+      </div>
+      <div class="strips" id="strips"></div>
+      <div class="foot-note" id="dataNote"></div>
+    </div>
+
+    <div class="sec" id="eventSec"></div>
+
+    <div class="sec">
+      <h2>Protocol <span class="count">6 stages · max 3 turns</span></h2>
+      <div class="stages" id="stages"></div>
+      <div class="turnrow"><span>Coordinator state <span class="state" id="stateName">IDLE</span></span><span style="display:flex;gap:8px;align-items:center">Turn <span class="turns" id="turns"><span></span><span></span><span></span></span></span></div>
+    </div>
+
+    <div class="sec">
+      <h2>Declared constraints <span class="count">turn 1 · ConstraintPacket</span></h2>
+      <div class="agents" id="agents"></div>
+    </div>
+
+    <div class="sec">
+      <h2>Solver packages <span class="count" id="pkgCount"></span></h2>
+      <div class="tablewrap" id="packages"></div>
+    </div>
+
+    <div class="sec tl">
+      <h2>Runway, gates and limits <span class="count">local time at destination</span></h2>
+      <div class="tablewrap" id="timeline"></div>
+    </div>
+
+    <div class="sec">
+      <h2>Outcome <span class="count">ConsensusRecord</span></h2>
+      <div id="outcome"></div>
+    </div>
+  </section>
+
+  <aside class="right" aria-label="Agent channel">
+    <div class="ch-head">
+      <h2>Agent channel <span class="chip" id="chainBadge">log empty</span></h2>
+      <div class="sub" id="chSub">Pick a flight to open its negotiation.</div>
+      <div class="filters" id="filters"></div>
+    </div>
+    <div class="player">
+      <button class="btn primary" id="btnPlay" type="button">Pause</button>
+      <button class="btn" id="btnStep" type="button">Step</button>
+      <button class="btn" id="btnEnd" type="button">Skip to end</button>
+      <button class="btn" id="btnReplay" type="button">Replay</button>
+      <label for="speed">Speed</label>
+      <select id="speed"><option value="1400">Slow</option><option value="800" selected>Normal</option><option value="250">Fast</option></select>
+      <span id="progress" style="margin-left:auto;font-family:var(--mono)"></span>
+    </div>
+    <div class="feed" id="feed" aria-live="polite"></div>
+    <div class="ch-foot"><span>Agents here are rule-based stand-ins. The build swaps in LLM calls using the same messages.</span><span>Simulated values are seeded per flight.</span></div>
+  </aside>
+</main>
+</div>
+
+<script>
+(function(){
+"use strict";
+// ---------- data ----------
+const HEADER="YEAR,MONTH,DAY,DAY_OF_WEEK,AIRLINE,FLIGHT_NUMBER,TAIL_NUMBER,ORIGIN_AIRPORT,DESTINATION_AIRPORT,SCHEDULED_DEPARTURE,DEPARTURE_TIME,DEPARTURE_DELAY,TAXI_OUT,WHEELS_OFF,SCHEDULED_TIME,ELAPSED_TIME,AIR_TIME,DISTANCE,WHEELS_ON,TAXI_IN,SCHEDULED_ARRIVAL,ARRIVAL_TIME,ARRIVAL_DELAY,DIVERTED,CANCELLED,CANCELLATION_REASON,AIR_SYSTEM_DELAY,SECURITY_DELAY,AIRLINE_DELAY,LATE_AIRCRAFT_DELAY,WEATHER_DELAY";
+const SAMPLE=[
+"2015,1,1,4,AA,5,N376AA,DFW,HNL,1305,1754,289,21,1815,515,526,499,3784,2234,6,1740,2240,300,0,0,,11,0,197,92,0",
+"2015,1,1,4,AA,8,N368AA,HNL,DFW,1745,1933,108,15,1948,445,446,420,3784,0648,11,0510,0659,109,0,0,,1,0,0,108,0",
+"2015,1,1,4,AA,16,N783AA,SFO,JFK,1245,1316,31,18,1334,330,333,305,2586,2139,10,2115,2149,34,0,0,,3,0,0,31,0",
+"2015,1,1,4,AA,23,N371AA,SFO,DFW,1050,1123,33,28,1151,210,217,178,1464,1649,11,1620,1700,40,0,0,,7,0,0,33,0",
+"2015,1,1,4,AA,35,N3ALAA,HDN,DFW,1320,1400,40,11,1411,135,130,109,769,1700,10,1635,1710,35,0,0,,0,0,7,28,0",
+"2015,2,26,4,DL,1639,UNKNOWN,DCA,ATL,1000,1021,21,15,1036,120,150,125,547,1241,10,1200,1251,51,0,0,,0,0,0,21,30"
+];
+let AIRPORTS={ATL:[33.64044,-84.42694,"Atlanta"],BHM:[33.56294,-86.75355,"Birmingham"],CHA:[35.03527,-85.20379,"Chattanooga"],CLT:[35.21401,-80.94313,"Charlotte"],GSP:[34.89567,-82.21886,"Greer"],DCA:[38.85208,-77.03772,"Arlington"],IAD:[38.94453,-77.45581,"Chantilly"],BWI:[39.1754,-76.6682,"Baltimore"],DFW:[32.89595,-97.0372,"Dallas-Fort Worth"],DAL:[32.84711,-96.85177,"Dallas"],IAH:[29.98047,-95.33972,"Houston"],HNL:[21.31869,-157.92241,"Honolulu"],OGG:[20.89865,-156.43046,"Kahului"],KOA:[19.73877,-156.04563,"Kailua/Kona"],SFO:[37.619,-122.37484,"San Francisco"],OAK:[37.72129,-122.22072,"Oakland"],SJC:[37.36186,-121.92901,"San Jose"],JFK:[40.63975,-73.77893,"New York"],EWR:[40.6925,-74.16866,"Newark"],LGA:[40.77724,-73.87261,"New York"],HDN:[40.48118,-107.21766,"Hayden"]};
+const AIRLINES={UA:"United",AA:"American",US:"US Airways",F9:"Frontier",B6:"JetBlue",OO:"SkyWest",AS:"Alaska",NK:"Spirit",WN:"Southwest",DL:"Delta",EV:"Atlantic Southeast",HA:"Hawaiian",MQ:"American Eagle",VX:"Virgin America"};
+let FLIGHTS=[]; let usingSample=true;
+
+function parseRows(lines,cols){
+  const ix={}; cols.forEach((c,i)=>ix[c.trim()]=i);
+  const out=[];
+  for(const line of lines){
+    if(!line) continue;
+    const v=line.split(",");
+    const g=k=>v[ix[k]];
+    const num=k=>{const x=g(k);return x===undefined||x===""?0:Number(x)};
+    if(num("CANCELLED")||num("DIVERTED")) continue;
+    const W=num("WEATHER_DELAY"), L=num("LATE_AIRCRAFT_DELAY");
+    if(!(W>15||L>20)) continue;
+    out.push({y:num("YEAR"),m:num("MONTH"),d:num("DAY"),al:g("AIRLINE"),fn:g("FLIGHT_NUMBER"),tail:g("TAIL_NUMBER")||"UNKNOWN",o:g("ORIGIN_AIRPORT"),de:g("DESTINATION_AIRPORT"),
+      schedArr:hm(g("SCHEDULED_ARRIVAL")),arr:hm(g("ARRIVAL_TIME")),wheelsOn:hm(g("WHEELS_ON")),taxiIn:num("TAXI_IN")||8,dist:num("DISTANCE"),
+      arrDelay:num("ARRIVAL_DELAY"),W,L,AS:num("AIR_SYSTEM_DELAY"),AL:num("AIRLINE_DELAY"),SE:num("SECURITY_DELAY")});
+  }
+  return out;
+}
+function hm(s){ if(s===undefined||s==="") return null; const n=Number(s); const h=Math.floor(n/100)%24, m=n%100; return h*60+m; }
+function fmt(t){ if(t==null||!isFinite(t)) return "n/a"; t=((Math.round(t)%1440)+1440)%1440; return String(Math.floor(t/60)).padStart(2,"0")+":"+String(t%60).padStart(2,"0"); }
+function dstr(f){ return f.y+"-"+String(f.m).padStart(2,"0")+"-"+String(f.d).padStart(2,"0"); }
+function fid(f){ return f.al+f.fn+"-"+dstr(f)+"-"+f.o+f.de; }
+FLIGHTS=parseRows(SAMPLE,HEADER.split(","));
+
+// ---------- seeded rng ----------
+function h32(str){ let h=0x811c9dc5; for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,0x01000193); } return h>>>0; }
+function rngFor(seed){ let a=h32(seed); return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+const ri=(r,lo,hi)=>lo+Math.floor(r()*(hi-lo+1));
+function hashHex(s){ const a=h32(s), b=h32(s+"#"+a); return a.toString(16).padStart(8,"0")+b.toString(16).padStart(8,"0"); }
+function dist(a,b){ const R=3958.8,toR=x=>x*Math.PI/180; const dLat=toR(b[0]-a[0]),dLon=toR(b[1]-a[1]); const q=Math.sin(dLat/2)**2+Math.cos(toR(a[0]))*Math.cos(toR(b[0]))*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.sqrt(q)); }
+
+// ---------- stage 0: triangulate + simulators ----------
+const POLICY={version:"policy-0.1",throughput:0.35,connections:0.30,fuel:0.15,turnaround:0.20};
+function triangulate(f){
+  const type=(f.W>15&&f.L>20)?"COMBINED":(f.W>15?"WEATHER":"KNOCK_ON");
+  const r=rngFor(fid(f)+"|event");
+  const E=Math.min(f.schedArr-f.taxiIn+f.L+f.AL+f.SE, (f.wheelsOn!=null?f.wheelsOn:f.arr-f.taxiIn));
+  const injected=[];
+  if(f.W>15){ injected.push({type:"RUNWAY_CLOSED",ref:"one of two arrival runways",start:E-10,end:E+f.W+ri(r,0,10)}); }
+  else { injected.push({type:"EQUIPMENT_FAILURE",ref:"jet bridge out at one gate",start:E-20,end:E+180}); }
+  return {event_id:"EVT-"+hashHex(fid(f)).slice(0,8).toUpperCase(),scenario_type:type,
+    flight:{airline:f.al,flight_no:f.al+f.fn,tail:f.tail,origin:f.o,dest:f.de,date:dstr(f)},
+    sched_arrival:f.schedArr,hist_arrival:f.arr,hist_delay_min:f.arrDelay,eta_landing:E,taxi_in:f.taxiIn,distance:f.dist,
+    causes:{weather:f.W,late_aircraft:f.L,air_system:f.AS,airline:f.AL,security:f.SE},injected,turn:1};
+}
+function simulate(ev,stress){
+  const r=rngFor(ev.event_id+"|private");
+  const E=ev.eta_landing, W=ev.causes.weather;
+  const closure=ev.injected.find(x=>x.type==="RUNWAY_CLOSED");
+  const spacingAt=t=>closure&&t<closure.end?8:4;
+  const queue=W>15?Math.round(W*0.6):ri(r,3,8);
+  const first=E+queue;
+  // runway grid: occupied traffic and free slots
+  const traffic=[], slots=[]; let t=E-24; let wantFree=closure?3:4; let skip=0;
+  while(t<E+150){
+    if(t>=first && slots.length<wantFree && skip<=0){ slots.push(t); skip=ri(r,0,1); }
+    else { traffic.push(t); if(t>=first) skip--; }
+    t+=spacingAt(t);
+  }
+  const demand={}; slots.forEach((s,i)=>demand[s]=Math.max(1,Math.min(4,4-i+ri(r,0,1))));
+  // pilot
+  const landBy=stress.fuel? first-3 : E+ri(r,45,74);
+  const hub=["ATL","DFW","ORD","DEN","IAH","CLT","JFK","SFO","LAX","PHX","MSP","DTW","EWR","SEA"].includes(ev.flight.dest);
+  const pax=hub?ri(r,24,60):ri(r,6,30);
+  const connectBy=ev.sched_arrival+ri(r,28,55);
+  // ground
+  const letter=ev.flight.dest==="ATL"?"A":(ev.flight.dest[0]);
+  const n1=ri(r,2,14), n2=n1+ri(r,2,5), n3=n2+ri(r,1,4);
+  const gates=[letter+n1,letter+n2,letter+n3];
+  const Ti=ev.taxi_in;
+  const freeFrom={}; freeFrom[gates[0]]=E+Ti+ri(r,8,38); freeFrom[gates[1]]=E-30; freeFrom[gates[2]]=E+ri(r,5,30);
+  const failed=ev.injected.find(x=>x.type==="EQUIPMENT_FAILURE")?gates[1]:null;
+  const minTurn=ev.distance>2000?60:(ev.distance>1000?45:35);
+  const shiftEnd=stress.crew? first+Ti+minTurn-6 : E+Ti+minTurn+ri(r,25,85);
+  const dutyLimit=shiftEnd+45;
+  const nextDep=ev.sched_arrival+minTurn+ri(r,20,60);
+  return {atc:{slots,traffic,demand,closure,minSep:3,first},pilot:{landBy,pax,connectBy,redLinePax:25},ground:{gates,assigned:gates[0],freeFrom,failed,minTurn,shiftEnd,dutyLimit,nextDep,redLineOvertime:20}};
+}
+
+// ---------- agents (rule-based stand-ins, same contracts as LLM agents) ----------
+function declare(role,ev,P){
+  if(role==="ATC"){ const a=P.atc; return {event_id:ev.event_id,agent:"ATC",turn:1,
+    hard:[{id:"A_H1",rule:"SLOT_IN_SEQUENCE",value:a.slots.map(fmt)},{id:"A_H2",rule:"MIN_SEPARATION_MIN",value:a.minSep}],
+    soft:[{id:"A_S1",preference:"Use low-demand slots to protect sector throughput",weight:0.7}],
+    options:a.slots.map(s=>({type:"SLOT",value:fmt(s),demand:a.demand[s]})),
+    facts_owned:{runway:a.closure?("single runway until "+fmt(a.closure.end)):"both runways open",traffic_in_window:a.traffic.filter(x=>x>=ev.eta_landing-10&&x<=ev.eta_landing+90).length}}; }
+  if(role==="PILOT"){ const p=P.pilot; return {event_id:ev.event_id,agent:"PILOT",turn:1,
+    hard:[{id:"P_H1",rule:"LAND_BY",value:fmt(p.landBy)}],
+    soft:[{id:"P_S1",preference:"At gate by "+fmt(p.connectBy)+" to protect "+p.pax+" connecting passengers",weight:0.7},{id:"P_S2",preference:"Maximise fuel margin at landing",weight:0.3}],
+    options:[],facts_owned:{fuel_endurance_until:fmt(p.landBy),connecting_pax:p.pax}}; }
+  const g=P.ground; return {event_id:ev.event_id,agent:"GROUND",turn:1,
+    hard:[{id:"G_H1",rule:"GATE_FREE_FROM",value:Object.fromEntries(g.gates.map(x=>[x,g.failed===x?"unavailable":fmt(g.freeFrom[x])]))},{id:"G_H2",rule:"CREW_DUTY_LIMIT",value:fmt(g.dutyLimit)}],
+    soft:[{id:"G_S1",preference:"Finish turnaround before crew shift ends "+fmt(g.shiftEnd)+" (no overtime)",weight:0.6},{id:"G_S2",preference:"Keep assigned gate "+g.assigned,weight:0.4}],
+    options:g.gates.filter(x=>x!==g.failed).map(x=>({type:"GATE",value:x})),facts_owned:{min_turnaround_min:g.minTurn,next_leg_departure:fmt(g.nextDep)}};
+}
+function util(pkg,ev,P){
+  const a=P.atc,p=P.pilot,g=P.ground;
+  const gateArr=pkg.slot+ev.taxi_in;
+  const thr=1-((a.demand[pkg.slot]||1)-1)/3;
+  const conn=gateArr<=p.connectBy?1:Math.max(0,1-(gateArr-p.connectBy)/30);
+  const fuel=Math.max(0,Math.min(1,(p.landBy-pkg.slot)/45));
+  const over=Math.max(0,gateArr+g.minTurn-g.shiftEnd);
+  const crew=over===0?1:Math.max(0,1-over/60);
+  const gate=pkg.gate===g.assigned?1:0.6;
+  return {A_S1:thr,P_S1:conn,P_S2:fuel,G_S1:crew,G_S2:gate,gateArr,over};
+}
+function decide(role,pkg,ev,P,packet){
+  const u=util(pkg,ev,P), p=P.pilot, g=P.ground, a=P.atc;
+  const base={event_id:ev.event_id,package_id:pkg.package_id,agent:role,turn:pkg.turn};
+  if(role==="ATC"){
+    if(!a.slots.includes(pkg.slot)) return {...base,verdict:"REJECT",reason_code:"SEPARATION",cites:"A_H1",rationale:fmt(pkg.slot)+" is not a free slot in my sequence."};
+    return {...base,verdict:"ACCEPT",reason_code:null,cites:null,rationale:"Slot "+fmt(pkg.slot)+" fits the sequence"+(a.demand[pkg.slot]>=3?", though it is a contested slot.":".")};
+  }
+  if(role==="PILOT"){
+    if(pkg.slot>p.landBy) return {...base,verdict:"REJECT",reason_code:"FUEL_LIMIT",cites:"P_H1",rationale:"Landing at "+fmt(pkg.slot)+" is past my fuel limit of "+fmt(p.landBy)+"."};
+    if(u.P_S1===0&&p.pax>=p.redLinePax) return {...base,verdict:"REJECT",reason_code:"CONNECTION_RISK",cites:"P_S1",rationale:"Gate arrival "+fmt(u.gateArr)+" strands all "+p.pax+" connecting passengers (need "+fmt(p.connectBy)+")."};
+    return {...base,verdict:"ACCEPT",reason_code:null,cites:null,rationale:"Fuel margin "+Math.round(p.landBy-pkg.slot)+" min; connections "+(u.P_S1>=1?"protected":"partly at risk")+"."};
+  }
+  if(g.failed===pkg.gate||u.gateArr<g.freeFrom[pkg.gate]) return {...base,verdict:"REJECT",reason_code:"GATE_CONFLICT",cites:"G_H1",rationale:"Gate "+pkg.gate+" is not available at "+fmt(u.gateArr)+"."};
+  if(u.gateArr+g.minTurn>g.dutyLimit) return {...base,verdict:"REJECT",reason_code:"CREW_DUTY",cites:"G_H2",rationale:"Turnaround would breach the crew duty limit "+fmt(g.dutyLimit)+"."};
+  if(u.over>g.redLineOvertime) return {...base,verdict:"REJECT",reason_code:"CREW_DUTY",cites:"G_S1",rationale:"Turnaround ends "+fmt(u.gateArr+g.minTurn)+", "+u.over+" min of crew overtime."};
+  return {...base,verdict:"ACCEPT",reason_code:null,cites:null,rationale:"Gate "+pkg.gate+" ready; turnaround done by "+fmt(u.gateArr+g.minTurn)+"."};
+}
+// ---------- solver: uses DECLARED packets only ----------
+function solve(ev,P,packets,cuts,turn,tried){
+  const atc=packets.ATC, pil=packets.PILOT, gr=packets.GROUND;
+  const slots=atc?atc.options.map(o=>o.value):[]; const gates=gr?gr.options.map(o=>o.value):[];
+  const landBy=pil?pil.hard[0].value:null; const freeMap=gr?gr.hard[0].value:{}; const duty=gr?gr.hard[1].value:null;
+  const toMin=s=>{const [h,m]=s.split(":").map(Number);return h*60+m;};
+  const base=Math.floor(ev.eta_landing/1440)*1440; const norm=v=>{let x=base+toMin(v); if(x<ev.eta_landing-240) x+=1440; return x;};
+  const all=[]; let n=0;
+  for(const s of slots) for(const g of gates){
+    n++; const slot=norm(s); const pkg={event_id:ev.event_id,package_id:"P"+n,turn,slot,gate:g,route_change:null};
+    const gateArr=slot+ev.taxi_in; const why=[];
+    if(landBy&&slot>norm(landBy)) why.push("FUEL_LIMIT");
+    if(freeMap[g]==="unavailable"||(freeMap[g]&&gateArr<norm(freeMap[g]))) why.push("GATE_CONFLICT");
+    if(duty&&gateArr+((gr&&gr.facts_owned.min_turnaround_min)||0)>norm(duty)) why.push("CREW_DUTY");
+    const u=util(pkg,ev,P);
+    const bd={throughput:+(POLICY.throughput*u.A_S1).toFixed(3),connections:+(POLICY.connections*u.P_S1).toFixed(3),fuel:+(POLICY.fuel*u.P_S2).toFixed(3),turnaround:+(POLICY.turnaround*(0.7*u.G_S1+0.3*u.G_S2)).toFixed(3)};
+    pkg.score=+(bd.throughput+bd.connections+bd.fuel+bd.turnaround).toFixed(3); pkg.score_breakdown=bd; pkg.u=u;
+    pkg.satisfies_hard=why.length===0; pkg.discard=why;
+    if(!why.length){ for(const c of cuts){ if(!(u[c.pref]>c.min)){ pkg.cut=c; break; } } }
+    if(tried.includes(pkg.slot+"|"+pkg.gate)) pkg.tried=true;
+    all.push(pkg);
+  }
+  all.sort((a,b)=>(b.satisfies_hard-a.satisfies_hard)||(b.score-a.score));
+  const feasible=all.filter(p=>p.satisfies_hard&&!p.cut&&!p.tried);
+  return {all,feasible,top:feasible[0]||null};
+}
+// ---------- checker: independent, uses GROUND TRUTH private state ----------
+function check(pkg,ev,P){
+  const a=P.atc,p=P.pilot,g=P.ground; const gateArr=pkg.slot+ev.taxi_in;
+  const near=a.traffic.reduce((m,t)=>Math.min(m,Math.abs(t-pkg.slot)),999);
+  const rules=[
+    {rule:"SEPARATION",pass:a.slots.includes(pkg.slot)&&near>=a.minSep,detail:"nearest traffic "+near+" min (min "+a.minSep+")"},
+    {rule:"FUEL_LIMIT",pass:pkg.slot<=p.landBy,detail:"land "+fmt(pkg.slot)+" vs limit "+fmt(p.landBy)},
+    {rule:"GATE_CONFLICT",pass:/^REMOTE/.test(pkg.gate)||(g.failed!==pkg.gate&&gateArr>=g.freeFrom[pkg.gate]),detail:/^REMOTE/.test(pkg.gate)?pkg.gate+" remote stand, always available":pkg.gate+" free "+(g.failed===pkg.gate?"never (failed)":fmt(g.freeFrom[pkg.gate]))+", arrive "+fmt(gateArr)},
+    {rule:"CREW_DUTY",pass:gateArr+g.minTurn<=g.dutyLimit,detail:"done "+fmt(gateArr+g.minTurn)+" vs duty limit "+fmt(g.dutyLimit)}];
+  return {pass:rules.every(r=>r.pass),rules};
+}
+// ---------- fallback: FCFS, earliest feasible gate, divert on fuel ----------
+function fallback(ev,P){
+  const a=P.atc,p=P.pilot,g=P.ground;
+  const slot=a.slots.slice().sort((x,y)=>x-y)[0];
+  if(slot==null||slot>p.landBy){
+    const d=AIRPORTS[ev.flight.dest]; let best=null;
+    if(d) for(const k in AIRPORTS){ if(k===ev.flight.dest||k===ev.flight.origin) continue; const dd=dist(d,AIRPORTS[k]); if(!best||dd<best.d) best={k,d:dd}; }
+    return {divert:true,alternate:best?best.k:"nearest alternate",alt_dist_mi:best?Math.round(best.d):null,slot:null,gate:null,note:"Earliest slot "+fmt(slot)+" is past the fuel limit "+fmt(p.landBy)+"."};
+  }
+  const gateArr=slot+ev.taxi_in;
+  const gate=g.gates.filter(x=>x!==g.failed).sort((x,y)=>g.freeFrom[x]-g.freeFrom[y]).find(x=>g.freeFrom[x]<=gateArr)||"REMOTE-1";
+  return {divert:false,slot,gate,package_id:"FB",note:"First-come-first-served slot, earliest free gate."};
+}
+
+// ---------- coordinator: state machine producing the message log ----------
+function run(f,stress){
+  const msgs=[]; let prev="GENESIS";
+  const add=(m)=>{ m.seq=msgs.length+1; m.clock=msgs.length*2+(m.who==="coord"||m.who==="checker"||m.who==="solver"?0.4:1.2); const body=JSON.stringify({seq:m.seq,who:m.who,type:m.type,payload:m.payload||null}); m.hash=hashHex(prev+body); m.prev=prev; prev=m.hash; msgs.push(m); };
+  const ev=triangulate(f); const P=simulate(ev,stress);
+  const why=ev.scenario_type==="COMBINED"?"weather "+ev.causes.weather+" > 15 and late aircraft "+ev.causes.late_aircraft+" > 20":(ev.scenario_type==="WEATHER"?"weather "+ev.causes.weather+" > 15":"late aircraft "+ev.causes.late_aircraft+" > 20");
+  add({who:"coord",type:"STATE",state:"TRIANGULATED",stage:0,turn:0,note:true,text:"Row selected: <code>"+ev.flight.flight_no+"</code> "+ev.flight.origin+" to "+ev.flight.dest+", "+ev.flight.date+". Guard passes ("+why+"). Moving <code>IDLE</code> to <code>TRIANGULATED</code>.",fx:{ev,P}});
+  const inj=ev.injected[0];
+  add({who:"builder",type:"DisruptionEvent",stage:0,turn:0,text:"Delay of "+ev.hist_delay_min+" min broken down: "+ev.causes.weather+" weather, "+ev.causes.late_aircraft+" late aircraft, "+ev.causes.air_system+" air system. Classified <b>"+ev.scenario_type+"</b>. Injected: "+inj.type.replace("_"," ").toLowerCase()+" ("+inj.ref+")"+(inj.type==="RUNWAY_CLOSED"?" until "+fmt(inj.end):"")+". Earliest landing "+fmt(ev.eta_landing)+".",payload:{...ev,sched_arrival:fmt(ev.sched_arrival),hist_arrival:fmt(ev.hist_arrival),eta_landing:fmt(ev.eta_landing),injected:ev.injected.map(x=>({...x,start:fmt(x.start),end:fmt(x.end)}))}});
+  add({who:"coord",type:"BROADCAST",state:"DECLARING",stage:1,turn:1,note:true,text:"Turn 1 of 3. Shared facts broadcast to ATC, Pilot and Ground. Each agent loads only its own private state. Waiting for three <code>ConstraintPacket</code>s. Timeout rule: a missing agent counts as most restrictive."});
+  const packets={};
+  const say={
+    ATC:k=>"Runway: "+k.facts_owned.runway+". I can offer "+k.options.map(o=>o.value+(o.demand>=3?" (contested)":"")).join(", ")+". Hard: these slots only, "+k.hard[1].value+" min separation. Soft: keep contested slots for other traffic.",
+    PILOT:k=>"Hard: must land by "+k.hard[0].value+" (fuel). Soft: "+k.soft[0].preference.toLowerCase()+" (w "+k.soft[0].weight+"), more fuel margin (w "+k.soft[1].weight+").",
+    GROUND:k=>"Gates: "+Object.entries(k.hard[0].value).map(([g,v])=>g+" "+(v==="unavailable"?"unavailable":"free "+v)).join(", ")+". Hard: crew duty limit "+k.hard[1].value+". Soft: "+k.soft[0].preference.toLowerCase()+"; "+k.soft[1].preference.toLowerCase()+"."};
+  for(const role of ["ATC","PILOT","GROUND"]){
+    const k=declare(role,ev,P); packets[role]=k;
+    add({who:role.toLowerCase(),type:"ConstraintPacket",stage:2,turn:1,text:say[role](k),payload:k,fx:{packet:role}});
+  }
+  add({who:"coord",type:"VALIDATE",state:"SOLVING",stage:3,turn:1,note:true,text:"3 packets received, schema valid. Facts owned by each agent are locked (owner wins on conflict). Moving to <code>SOLVING</code>."});
+  const cuts=[]; const tried=[]; let turn=1; let outcome=null, finalPkg=null, decisions=[], checkRes=null;
+  while(true){
+    let S=solve(ev,P,packets,cuts,turn+1,tried);
+    let top=S.top;
+    if(stress.corrupt&&turn===1){
+      const bad=S.all.find(p=>!p.satisfies_hard)||null;
+      if(bad){ top={...bad,satisfies_hard:true,corrupted:true}; }
+      else if(S.top){ const occ=P.atc.traffic.filter(t=>t>S.top.slot).sort((x,y)=>x-y)[0]; top={...S.top,package_id:S.top.package_id+"x",slot:occ,satisfies_hard:true,corrupted:true,discard:["SEPARATION"],u:util({...S.top,slot:occ},ev,P)}; }
+    }
+    const disc=S.all.filter(p=>!p.satisfies_hard);
+    add({who:"solver",type:"ResolutionPackage",stage:3,turn:turn+1,text:"Enumerated "+S.all.length+" slot x gate packages. Discarded "+disc.length+" on hard limits"+(cuts.length?", "+S.all.filter(p=>p.cut).length+" by reject cuts":"")+". "+(top?"Top ranked: <b>"+top.package_id+"</b> "+fmt(top.slot)+" + "+top.gate+", score "+top.score.toFixed(2)+(top.corrupted?" <b>(corrupted: breaks "+top.discard.join(", ")+")</b>":"")+".":"Feasible set is empty."),
+      payload:top?{event_id:ev.event_id,package_id:top.package_id,turn:turn+1,slot:fmt(top.slot),gate:top.gate,route_change:null,score:top.score,score_breakdown:top.score_breakdown,satisfies_hard:true}:{feasible:0},fx:{solve:S,top,turn:turn+1}});
+    if(!top){ add({who:"coord",type:"STATE",state:"FALLBACK",stage:5,turn:turn+1,note:true,text:"No package satisfies every declared hard limit. Guard: feasible set empty, so <code>SOLVING</code> goes to <code>FALLBACK</code>."}); outcome="FALLBACK"; break; }
+    turn++;
+    add({who:"coord",type:"SEND",state:"CHECKING",stage:4,turn,note:true,text:"Turn "+turn+" of 3. Sending <code>"+top.package_id+"</code> to all agents and to the checker."});
+    decisions=["ATC","PILOT","GROUND"].map(r=>decide(r,top,ev,P,packets[r]));
+    for(const d of decisions){
+      const own=packets[d.agent]; const ids=[...own.hard,...own.soft].map(x=>x.id);
+      if(d.verdict==="REJECT"&&!ids.includes(d.cites)){ d.verdict="ACCEPT"; d.objection="Reject did not cite a declared constraint"; }
+      add({who:d.agent.toLowerCase(),type:"Decision",stage:4,turn,text:(d.verdict==="ACCEPT"?"<b>ACCEPT</b> ":"<b>REJECT</b> <code>"+d.reason_code+"</code> citing <code>"+d.cites+"</code>. ")+d.rationale,payload:d,fx:{decision:d}});
+    }
+    checkRes=check(top,ev,P);
+    add({who:"checker",type:"CheckResult",stage:4,turn,text:(checkRes.pass?"<b>PASS</b>. ":"<b>FAIL</b>. ")+checkRes.rules.map(r=>(r.pass?"✓ ":"✗ ")+r.rule.toLowerCase().replace("_"," ")+" ("+r.detail+")").join("; ")+". Verified against ground truth, independent of the agents and the solver.",payload:checkRes,fx:{check:checkRes}});
+    const rejects=decisions.filter(d=>d.verdict==="REJECT");
+    if(!rejects.length&&checkRes.pass){ outcome="CONSENSUS"; finalPkg=top; add({who:"coord",type:"STATE",state:"COMMITTED",stage:5,turn,note:true,text:"All three ACCEPT and the checker passes. Guard satisfied: <code>CHECKING</code> to <code>COMMITTED</code> in "+turn+" turns."}); break; }
+    tried.push(top.slot+"|"+top.gate);
+    const reasons=rejects.map(d=>d.agent+" "+d.reason_code+" ("+d.cites+")").join(", ")+(checkRes.pass?"":(rejects.length?", ":"")+"checker FAIL");
+    if(!checkRes.pass&&!rejects.length) {}
+    for(const d of rejects){ if(d.cites&&/_S/.test(d.cites)) cuts.push({agent:d.agent,pref:d.cites,min:top.u[d.cites]}); }
+    if(turn<3){ add({who:"coord",type:"STATE",state:"SOLVING",stage:3,turn,note:true,text:(checkRes.pass?"":"Checker blocked this package, so it can never be committed. ")+"Rejected by "+reasons+". Turn "+turn+" is under 3, so back to <code>SOLVING</code>. Reason codes become cuts: the next package must improve "+(cuts.length?cuts.map(c=>"<code>"+c.pref+"</code>").join(", "):"on the rejected package")+"."}); continue; }
+    outcome="FALLBACK"; add({who:"coord",type:"STATE",state:"FALLBACK",stage:5,turn,note:true,text:"Still rejected at turn 3 ("+reasons+"). Guard: <code>CHECKING</code> to <code>FALLBACK</code>. The rule-based plan takes over."}); break;
+  }
+  let fb=fallback(ev,P), fbCheck=null;
+  if(!fb.divert) fbCheck=check({slot:fb.slot,gate:fb.gate},ev,P);
+  if(outcome==="FALLBACK"){
+    add({who:"coord",type:"FallbackPlan",stage:5,turn,note:false,text:fb.divert?"<b>DIVERT</b> to "+fb.alternate+(fb.alt_dist_mi?" ("+fb.alt_dist_mi+" mi)":"")+". "+fb.note:"Fallback plan: land "+fmt(fb.slot)+", gate "+fb.gate+". "+fb.note+(fbCheck?" Checker "+(fbCheck.pass?"PASS":"FAIL")+".":""),payload:{...fb,slot:fmt(fb.slot)},fx:{fallback:fb}});
+  }
+  const planArr=outcome==="CONSENSUS"?finalPkg.slot+ev.taxi_in:(fb.divert?null:fb.slot+ev.taxi_in);
+  const fbArr=fb.divert?null:fb.slot+ev.taxi_in;
+  const record={event_id:ev.event_id,outcome,package:outcome==="CONSENSUS"?{package_id:finalPkg.package_id,slot:fmt(finalPkg.slot),gate:finalPkg.gate}:(fb.divert?{divert:fb.alternate}:{package_id:"FB",slot:fmt(fb.slot),gate:fb.gate}),
+    turns_used:turn,decisions:decisions.map(d=>({agent:d.agent,verdict:d.verdict,reason_code:d.reason_code})),checker_pass:outcome==="CONSENSUS"?true:(fbCheck?fbCheck.pass:null),
+    planned_gate_arrival:fmt(planArr),delta_vs_history_min:planArr!=null?ev.hist_arrival-planArr:null,delta_vs_fallback_min:(planArr!=null&&fbArr!=null)?fbArr-planArr:null,
+    status:"AWAITING_SIGNOFF",signed_off_by:null,stamp:{policy:POLICY.version,solver:"solver-0.1",checker:"checker-0.1",agents:"rule-stand-in-0.1"}};
+  add({who:"coord",type:"ConsensusRecord",state:"AWAITING_SIGNOFF",stage:5,turn,text:"Outcome <b>"+outcome+"</b> after "+turn+" turns. Planned gate arrival "+fmt(planArr)+(record.delta_vs_history_min!=null?" vs "+fmt(ev.hist_arrival)+" historically ("+rel(record.delta_vs_history_min)+", illustrative)":"")+". Awaiting human sign-off before execution.",payload:record,fx:{record}});
+  return {ev,P,msgs,record,fb,fbCheck};
+}
+function rel(n){ if(n==null) return "n/a"; if(n===0) return "same time"; return Math.abs(n)+" min "+(n>0?"earlier":"later"); }
+function signed(n){ return (n>0?"saves ":(n<0?"costs ":""))+Math.abs(n); }
+
+// ---------- UI ----------
+const $=id=>document.getElementById(id);
+const WHO={coord:["Coordinator","CO","var(--coord)"],builder:["Scenario builder","SB","var(--builder)"],atc:["ATC agent","ATC","var(--atc)"],pilot:["Pilot agent","PLT","var(--pilot)"],ground:["Ground agent","GND","var(--ground)"],solver:["Solver","SOL","var(--solver)"],checker:["Checker","CHK","var(--checker)"],human:["Duty manager","YOU","var(--human)"]};
+const STAGES=[["Triangulate","code"],["Trigger","code"],["Declare","AI · turn 1"],["Solve","code"],["Check","AI + code"],["Commit","code"]];
+let current=null, shown=0, timer=null, playing=true, selected=null, filterOn={coord:true,builder:true,atc:true,pilot:true,ground:true,solver:true,checker:true,human:true}, signoff=null;
+
+function stress(){ return {fuel:$("stressFuel").checked,crew:$("stressCrew").checked,corrupt:$("stressCorrupt").checked}; }
+function renderBoard(){
+  const q=$("search").value.trim().toLowerCase();
+  const list=FLIGHTS.filter(f=>!q||(f.al+f.fn).toLowerCase().includes(q)||f.o.toLowerCase().includes(q)||f.de.toLowerCase().includes(q)||dstr(f).includes(q));
+  $("boardCount").textContent=list.length+(list.length>300?" (showing 300)":"")+" qualifying";
+  const box=$("strips"); box.innerHTML="";
+  if(!list.length){ box.innerHTML='<div class="empty">No qualifying flight matches. Try a flight number like DL1639 or an airport code.</div>'; return; }
+  for(const f of list.slice(0,300)){
+    const type=(f.W>15&&f.L>20)?"COMBINED":(f.W>15?"WEATHER":"KNOCK_ON");
+    const b=document.createElement("button"); b.type="button"; b.className="strip"; b.setAttribute("aria-pressed",selected&&fid(selected)===fid(f)?"true":"false");
+    b.innerHTML='<div class="cs">'+f.al+f.fn+'<small>'+f.tail+'</small></div><div class="mid"><div class="route">'+f.o+' → '+f.de+'</div><div class="meta">'+dstr(f)+' · sched '+fmt(f.schedArr)+' · arr '+fmt(f.arr)+' · '+(AIRLINES[f.al]||f.al)+'</div></div><div class="end"><span class="delay">+'+f.arrDelay+' min</span><span class="chip '+(type==="WEATHER"?"weather":type==="KNOCK_ON"?"knock":"combined")+'">'+type+'</span></div>';
+    b.addEventListener("click",()=>openFlight(f));
+    box.appendChild(b);
+  }
+  $("dataNote").textContent=usingSample?"Sample: 5 real rows from flights.csv plus DL1639 reconstructed from the architecture's worked trace. Load the full flights.csv to search every qualifying row; it stays in your browser.":"Loaded "+FLIGHTS.length+" qualifying rows from your file (weather > 15 or late aircraft > 20, not cancelled or diverted).";
+}
+function openFlight(f){
+  selected=f; signoff=null; renderBoard();
+  current=run(f,stress()); shown=0; $("feed").innerHTML=""; playing=true; $("btnPlay").textContent="Pause";
+  $("chSub").textContent=current.ev.flight.flight_no+" · "+current.ev.flight.origin+" → "+current.ev.flight.dest+" · "+current.ev.flight.date+" · "+current.ev.event_id;
+  renderAll(); schedule();
+}
+function schedule(){ clearTimeout(timer); if(!current||!playing) return; if(shown>=current.msgs.length){ playing=false; $("btnPlay").textContent="Play"; return; }
+  const next=current.msgs[shown]; const isAgent=["atc","pilot","ground"].includes(next.who);
+  const delay=Number($("speed").value);
+  if(isAgent&&delay>300){ showTyping(next.who); timer=setTimeout(()=>{ hideTyping(); step(); schedule(); },delay); }
+  else timer=setTimeout(()=>{ step(); schedule(); },delay*0.6);
+}
+function showTyping(who){ hideTyping(); const w=WHO[who]; const d=document.createElement("div"); d.className="typing"; d.id="typing"; d.style.setProperty("--c",w[2]); d.innerHTML='<div class="av" style="--c:'+w[2]+'">'+w[1]+'</div><span>'+w[0]+' is composing</span><span class="dots"><span></span><span></span><span></span></span>'; $("feed").appendChild(d); scrollFeed(); }
+function hideTyping(){ const t=$("typing"); if(t) t.remove(); }
+function step(){ if(!current||shown>=current.msgs.length) return; appendMsg(current.msgs[shown]); shown++; renderAll(); }
+function appendMsg(m){
+  const w=WHO[m.who]; const el=document.createElement("div"); el.className="msg"; el.dataset.who=m.who; el.style.setProperty("--c",w[2]);
+  if(!filterOn[m.who]) el.hidden=true;
+  const payload=m.payload?'<details class="payload"><summary>View '+m.type+' payload</summary><pre>'+esc(JSON.stringify(m.payload,null,2))+'</pre></details>':"";
+  el.innerHTML='<div class="av">'+w[1]+'</div><div class="bubble'+(m.note?" note":"")+'"><div class="mh"><b>'+w[0]+'</b><span class="type">'+m.type+'</span>'+(m.state?'<span class="type">'+m.state+'</span>':"")+'<span class="t">T'+(m.turn||0)+' · +'+m.clock.toFixed(1)+'s</span></div><div class="mtext">'+m.text+'</div>'+payload+'<div class="hash">#'+m.seq+' · '+m.hash+'</div></div>';
+  $("feed").appendChild(el); scrollFeed();
+}
+function scrollFeed(){ const f=$("feed"); f.scrollTop=f.scrollHeight; }
+function esc(s){ return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function viewState(){
+  const v={stage:-1,turn:0,state:"IDLE",packets:{},decisions:{},solve:null,top:null,check:null,record:null,fallback:null};
+  if(!current) return v;
+  for(let i=0;i<shown;i++){ const m=current.msgs[i]; v.stage=Math.max(v.stage,m.stage); v.turn=Math.max(v.turn,m.turn||0); if(m.state) v.state=m.state;
+    const fx=m.fx||{}; if(fx.packet) v.packets[fx.packet]=m.payload; if(fx.solve){ v.solve=fx.solve; v.top=fx.top; v.decisions={}; v.check=null; }
+    if(fx.decision) v.decisions[fx.decision.agent]=fx.decision; if(fx.check) v.check=fx.check; if(fx.record) v.record=fx.record; if(fx.fallback) v.fallback=fx.fallback; }
+  return v;
+}
+function renderAll(){
+  const v=viewState(); renderEvent(v); renderStages(v); renderAgents(v); renderPackages(v); renderTimeline(v); renderOutcome(v);
+  $("progress").textContent=current?shown+" / "+current.msgs.length:"";
+  const b=$("chainBadge");
+  if(current&&shown){ let ok=true,prev="GENESIS"; for(let i=0;i<shown;i++){ const m=current.msgs[i]; if(m.prev!==prev) ok=false; prev=m.hash; } b.textContent=ok?"chain verified · "+shown+" entries":"chain broken"; b.className="chip "+(ok?"good":"bad"); }
+  else { b.textContent="log empty"; b.className="chip"; }
+}
+function renderEvent(v){
+  const s=$("eventSec");
+  if(!current){ s.innerHTML='<h2>Event</h2><div class="empty">Select a flight strip to triangulate its delay and open the negotiation.</div>'; return; }
+  const ev=current.ev, c=ev.causes; const tot=Math.max(1,c.weather+c.late_aircraft+c.air_system+c.airline+c.security);
+  const seg=(val,col)=>val>0?'<span style="width:'+(val/tot*100)+'%;background:'+col+'"></span>':"";
+  const inj=ev.injected[0];
+  s.innerHTML='<h2>Event <span class="count">'+ev.event_id+' · DisruptionEvent</span></h2><div class="event-grid"><div><div class="ev-title"><span class="big">'+ev.flight.flight_no+'</span><span class="sub">'+ev.flight.origin+' → '+ev.flight.dest+' · '+ev.flight.date+' · tail '+ev.flight.tail+'</span></div>'+
+  '<dl class="kv"><dt>Scheduled arrival</dt><dd>'+fmt(ev.sched_arrival)+'</dd><dt>Actual arrival (history)</dt><dd>'+fmt(ev.hist_arrival)+' (+'+ev.hist_delay_min+' min)</dd><dt>Earliest landing</dt><dd>'+fmt(ev.eta_landing)+'</dd><dt>Taxi-in</dt><dd>'+ev.taxi_in+' min</dd></dl></div>'+
+  '<div><div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:13px">Delay causes</b><span class="chip '+(ev.scenario_type==="WEATHER"?"weather":ev.scenario_type==="KNOCK_ON"?"knock":"combined")+'">'+ev.scenario_type+'</span></div>'+
+  '<div class="causebar" role="img" aria-label="Delay causes">'+seg(c.weather,"var(--accent)")+seg(c.late_aircraft,"var(--ground)")+seg(c.air_system,"var(--solver)")+seg(c.airline,"var(--pilot)")+seg(c.security,"var(--bad)")+'</div>'+
+  '<div class="legend"><span><i style="background:var(--accent)"></i>Weather '+c.weather+'</span><span><i style="background:var(--ground)"></i>Late aircraft '+c.late_aircraft+'</span><span><i style="background:var(--solver)"></i>Air system '+c.air_system+'</span><span><i style="background:var(--pilot)"></i>Airline '+c.airline+'</span></div>'+
+  '<div class="inject"><b>Injected (simulated):</b> '+(inj.type==="RUNWAY_CLOSED"?"one arrival runway closed until "+fmt(inj.end)+", single-runway spacing 8 min":"jet bridge failure takes one gate out of service")+'</div></div></div>';
+}
+function renderStages(v){
+  $("stages").innerHTML=STAGES.map((s,i)=>{ const cls=v.stage>i||(v.record&&i<=5)?"done":(v.stage===i?"active":""); return '<div class="stage '+cls+'"><b>'+i+' · '+s[0]+'</b><small>'+s[1]+'</small></div>'; }).join("");
+  $("stateName").textContent=v.state; [...$("turns").children].forEach((e,i)=>e.className=v.turn>i?"on":"");
+}
+function renderAgents(v){
+  const roles=[["ATC","atc","Landing slots, separation, runway"],["PILOT","pilot","Fuel, safety, connections"],["GROUND","ground","Gates, crew, turnaround"]];
+  $("agents").innerHTML=roles.map(([R,k,role])=>{ const p=v.packets[R]; const w=WHO[k]; const d=v.decisions[R];
+    let body='<div class="wait">'+(current?"Waiting for packet":"No flight selected")+'</div>';
+    if(p){ body='<ul>'+p.hard.map(h=>'<li class="hard"><span class="tag">🔒 '+h.id+'</span><span>'+h.rule.replace(/_/g," ").toLowerCase()+': '+fmtVal(h.value)+'</span></li>').join("")+p.soft.map(s=>'<li><span class="tag">'+s.id+'</span><span>'+s.preference+' <span class="chip" style="color:var(--muted)">w '+s.weight+'</span></span></li>').join("")+'</ul><div class="private">Private facts stay with the '+w[0].toLowerCase()+'. <span class="chip sim">simulated</span></div>'; }
+    const vote=d?'<div class="vote">'+(d.verdict==="ACCEPT"?'<span class="chip good">ACCEPT</span>':'<span class="chip bad">REJECT '+d.reason_code+'</span>')+' <span style="color:var(--muted)">'+d.package_id+'</span></div>':"";
+    return '<div class="agent" style="--c:'+w[2]+'"><div class="who"><b>'+w[0]+'</b><span style="font-size:11.5px;color:var(--muted)">'+role+'</span></div>'+body+vote+'</div>'; }).join("");
+}
+function fmtVal(v){ if(Array.isArray(v)) return v.join(", "); if(typeof v==="object") return Object.entries(v).map(([k,x])=>k+" "+x).join(", "); return String(v); }
+function renderPackages(v){
+  const box=$("packages");
+  if(!v.solve){ box.innerHTML='<div class="empty">'+(current?"Solver runs after all three packets arrive.":"No flight selected.")+'</div>'; $("pkgCount").textContent=""; return; }
+  const S=v.solve; $("pkgCount").textContent=S.all.length+" enumerated · "+S.feasible.length+" feasible";
+  const col={throughput:"var(--atc)",connections:"var(--pilot)",fuel:"var(--accent)",turnaround:"var(--ground)"};
+  box.innerHTML='<table><thead><tr><th>ID</th><th>Slot</th><th>Gate</th><th>Gate arr.</th><th>Score</th><th>Breakdown</th><th>Status</th></tr></thead><tbody>'+
+  S.all.map(p=>{ const pick=v.top&&p.package_id===v.top.package_id; const st=!p.satisfies_hard?'<td class="why">✗ '+p.discard.join(", ")+'</td>':(p.cut?'<td class="why">cut: '+p.cut.pref+'</td>':(p.tried?'<td>tried</td>':(pick?'<td><b>sent</b></td>':'<td>feasible</td>')));
+    const bars=p.satisfies_hard?'<div class="bars" title="throughput, connections, fuel, turnaround">'+Object.entries(p.score_breakdown).map(([k,x])=>'<span style="width:'+(x/1*120)+'px;background:'+col[k]+'"></span>').join("")+'</div>':"";
+    return '<tr class="'+(!p.satisfies_hard?"discard":"")+(pick?" pick":"")+'"><td class="mono">'+p.package_id+'</td><td class="mono">'+fmt(p.slot)+'</td><td class="mono">'+p.gate+'</td><td class="mono">'+fmt(p.slot+current.ev.taxi_in)+'</td><td class="mono">'+(p.satisfies_hard?p.score.toFixed(2):"–")+'</td><td>'+bars+'</td>'+st+'</tr>'; }).join("")+'</tbody></table>'+
+  '<div class="legend" style="margin-top:6px"><span><i style="background:var(--atc)"></i>Throughput</span><span><i style="background:var(--pilot)"></i>Connections</span><span><i style="background:var(--accent)"></i>Fuel</span><span><i style="background:var(--ground)"></i>Turnaround</span><span>Weights '+POLICY.throughput+' / '+POLICY.connections+' / '+POLICY.fuel+' / '+POLICY.turnaround+' ('+POLICY.version+')</span></div>';
+}
+function renderTimeline(v){
+  const box=$("timeline");
+  if(!current||!v.packets.ATC){ box.innerHTML='<div class="empty">'+(current?"Appears once ATC declares its slots.":"No flight selected.")+'</div>'; return; }
+  const ev=current.ev,P=current.P; const t0=Math.floor((ev.eta_landing-20)/10)*10; const t1=Math.max(...P.atc.slots,P.pilot.landBy,P.ground.shiftEnd,ev.hist_arrival,P.pilot.connectBy)+20;
+  const W=700,L=110,R=W-16; const X=t=>L+(t-t0)/(t1-t0)*(R-L);
+  const rows={runway:46,g0:86,g1:110,g2:134,limits:170}; const H=200;
+  let s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Timeline of runway slots, gate availability and limits">';
+  for(let t=Math.ceil(t0/15)*15;t<=t1;t+=15){ s+='<line class="grid" x1="'+X(t)+'" x2="'+X(t)+'" y1="22" y2="'+(H-14)+'"/><text x="'+X(t)+'" y="14" text-anchor="middle">'+fmt(t)+'</text>'; }
+  const cl=P.atc.closure; if(cl) s+='<rect x="'+X(Math.max(cl.start,t0))+'" y="32" width="'+Math.max(0,X(Math.min(cl.end,t1))-X(Math.max(cl.start,t0)))+'" height="28" fill="var(--warn-soft)"/><text x="'+(X(Math.max(cl.start,t0))+4)+'" y="58" style="fill:var(--warn)">single runway</text>';
+  s+='<text class="lane" x="8" y="'+(rows.runway+4)+'">Runway</text>';
+  P.atc.traffic.filter(t=>t>=t0&&t<=t1).forEach(t=>{ s+='<rect x="'+(X(t)-2)+'" y="'+(rows.runway-7)+'" width="4" height="14" rx="1" fill="var(--muted)" opacity=".55"/>'; });
+  const chosen=v.record&&v.record.outcome==="CONSENSUS"?v.top:null; const fbSlot=v.fallback&&!v.fallback.divert?v.fallback.slot:null;
+  P.atc.slots.forEach(t=>{ const on=(v.top&&v.top.slot===t); s+='<rect x="'+(X(t)-6)+'" y="'+(rows.runway-9)+'" width="12" height="18" rx="2" fill="'+(on?"var(--accent)":"var(--panel)")+'" stroke="var(--accent)" stroke-width="1.5"/>'; });
+  ["g0","g1","g2"].forEach((k,i)=>{ const g=P.ground.gates[i]; const y=rows[k]; const ff=P.ground.failed===g?t1:P.ground.freeFrom[g];
+    s+='<text class="lane" x="8" y="'+(y+4)+'">Gate '+g+(g===P.ground.assigned?" *":"")+'</text>';
+    if(ff>t0) s+='<rect x="'+X(t0)+'" y="'+(y-7)+'" width="'+(X(Math.min(ff,t1))-X(t0))+'" height="14" rx="2" fill="var(--ground)" opacity="'+(P.ground.failed===g?".35":".22")+'"/>';
+    s+='<text x="'+(X(Math.min(Math.max(ff,t0),t1))+4)+'" y="'+(y+4)+'">'+(P.ground.failed===g?"out of service":"free "+fmt(ff))+'</text>';
+    const pk=v.top&&v.top.gate===g?v.top:null; if(pk){ const ga=pk.slot+ev.taxi_in; s+='<rect x="'+X(ga)+'" y="'+(y-7)+'" width="'+(X(ga+P.ground.minTurn)-X(ga))+'" height="14" rx="2" fill="var(--accent)" opacity=".85"/>'; }
+  });
+  s+='<text class="lane" x="8" y="'+(rows.limits+4)+'">Limits</text>';
+  const vline=(t,col,label,dy)=>{ if(t<t0||t>t1) return; s+='<line x1="'+X(t)+'" x2="'+X(t)+'" y1="28" y2="'+(H-14)+'" stroke="'+col+'" stroke-width="1.4" stroke-dasharray="4 3"/><text x="'+(X(t)+3)+'" y="'+(rows.limits+dy)+'" style="fill:'+col+'">'+label+'</text>'; };
+  if(v.packets.PILOT){ vline(P.pilot.landBy,"var(--bad)","fuel limit "+fmt(P.pilot.landBy),-6); vline(P.pilot.connectBy,"var(--pilot)","connections "+fmt(P.pilot.connectBy),10); }
+  if(v.packets.GROUND) vline(P.ground.shiftEnd,"var(--ground)","crew shift end "+fmt(P.ground.shiftEnd),24);
+  vline(ev.hist_arrival,"var(--muted)","history "+fmt(ev.hist_arrival),-20);
+  if(fbSlot) s+='<circle cx="'+X(fbSlot)+'" cy="'+rows.runway+'" r="5" fill="none" stroke="var(--warn)" stroke-width="2"/>';
+  s+='</svg>'; box.innerHTML=s+'<div class="legend"><span><i style="background:var(--muted)"></i>Other traffic</span><span><i style="background:var(--panel);border:1.5px solid var(--accent)"></i>Free slot offered</span><span><i style="background:var(--accent)"></i>Package under vote / gate turnaround</span><span><i style="background:var(--ground);opacity:.35"></i>Gate occupied</span><span>* assigned gate</span></div>';
+}
+function renderOutcome(v){
+  const box=$("outcome");
+  if(!v.record){ box.innerHTML='<div class="empty">'+(current?"Negotiation in progress.":"No flight selected.")+'</div>'; return; }
+  const r=v.record; const okChip=r.outcome==="CONSENSUS"?'<span class="chip good">CONSENSUS</span>':'<span class="chip warn">FALLBACK</span>';
+  const pk=r.package.divert?"Divert to "+r.package.divert:(r.package.slot+" · "+r.package.gate);
+  const dh=r.delta_vs_history_min, df=r.delta_vs_fallback_min;
+  box.innerHTML='<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">'+okChip+'<span class="chip '+(r.checker_pass===false?"bad":"good")+'">checker '+(r.checker_pass===null?"n/a (divert)":(r.checker_pass?"PASS":"FAIL"))+'</span><span style="color:var(--muted);font-size:12.5px">Stamped '+r.stamp.policy+' · '+r.stamp.solver+' · '+r.stamp.checker+'</span></div>'+
+  '<div class="outcome"><div class="stat"><small>Plan</small><b>'+pk+'</b></div><div class="stat"><small>Turns used</small><b>'+r.turns_used+' / 3</b></div><div class="stat"><small>Gate arrival vs history</small><b>'+rel(dh)+'</b></div><div class="stat"><small>vs fallback plan</small><b>'+rel(df)+'</b></div></div>'+
+  '<div class="signoff">'+(signoff?'<span class="chip '+(signoff==="APPROVED"?"good":"bad")+'">'+signoff+'</span><span style="color:var(--muted)">Recorded in the log as the human decision.</span>':'<span>Awaiting human sign-off.</span><button class="btn primary" id="btnApprove" type="button">Approve plan</button><button class="btn" id="btnReject" type="button">Reject</button>')+'</div>'+
+  '<div class="foot-note" style="margin-top:6px">"vs history" compares one real outcome under different conditions, so treat it as illustrative.</div>';
+  if(!signoff){ $("btnApprove").onclick=()=>sign("APPROVED"); $("btnReject").onclick=()=>sign("REJECTED"); }
+}
+function sign(dec){ signoff=dec; const m={who:"human",type:"SignOff",state:dec==="APPROVED"?"EXECUTING":"RETURNED",stage:5,turn:current.record.turns_used,text:dec==="APPROVED"?"Plan approved. <code>signed_off_by</code> recorded; execution may proceed.":"Plan rejected by the duty manager. Event returned for manual handling.",payload:{event_id:current.ev.event_id,decision:dec,signed_off_by:"duty-manager (demo)"}};
+  const prev=current.msgs[current.msgs.length-1]; m.seq=current.msgs.length+1; m.clock=prev.clock+3; m.prev=prev.hash; m.hash=hashHex(prev.hash+JSON.stringify({seq:m.seq,who:m.who,type:m.type,payload:m.payload})); current.msgs.push(m); shown=current.msgs.length; appendMsg(m); current.record.signed_off_by="duty-manager (demo)"; renderAll(); }
+
+// filters
+$("filters").innerHTML=Object.entries(WHO).map(([k,w])=>'<button type="button" class="fchip" style="--c:'+w[2]+'" aria-pressed="true" data-k="'+k+'">'+w[0]+'</button>').join("");
+$("filters").addEventListener("click",e=>{ const b=e.target.closest(".fchip"); if(!b) return; const k=b.dataset.k; filterOn[k]=!filterOn[k]; b.setAttribute("aria-pressed",String(filterOn[k])); document.querySelectorAll('.msg[data-who="'+k+'"]').forEach(m=>m.hidden=!filterOn[k]); });
+$("btnPlay").onclick=()=>{ if(!current) return; playing=!playing; $("btnPlay").textContent=playing?"Pause":"Play"; if(playing){ if(shown>=current.msgs.length){ replay(); return; } schedule(); } else { clearTimeout(timer); hideTyping(); } };
+$("btnStep").onclick=()=>{ if(!current) return; playing=false; $("btnPlay").textContent="Play"; clearTimeout(timer); hideTyping(); step(); };
+$("btnEnd").onclick=()=>{ if(!current) return; clearTimeout(timer); hideTyping(); while(shown<current.msgs.length) step(); playing=false; $("btnPlay").textContent="Play"; };
+function replay(){ if(!selected) return; openFlight(selected); }
+$("btnReplay").onclick=replay;
+$("speed").onchange=()=>{ if(playing) schedule(); };
+["stressFuel","stressCrew","stressCorrupt"].forEach(id=>$(id).addEventListener("change",()=>{ if(selected) openFlight(selected); }));
+$("search").addEventListener("input",renderBoard);
+$("fileFlights").addEventListener("change",e=>{ const file=e.target.files[0]; if(!file) return; $("dataNote").textContent="Reading "+file.name+"…"; const rd=new FileReader(); rd.onload=()=>{ const txt=String(rd.result); const lines=txt.split(/\r?\n/); const cols=lines.shift().split(","); try{ const rows=parseRows(lines,cols); if(!rows.length){ $("dataNote").textContent="No qualifying rows found. Check that the file has the flights.csv columns."; return; } FLIGHTS=rows; usingSample=false; renderBoard(); }catch(err){ $("dataNote").textContent="Could not read that file: "+err.message; } }; rd.onerror=()=>{ $("dataNote").textContent="Could not read that file. Try loading it again."; }; rd.readAsText(file); });
+$("fileAirports").addEventListener("change",e=>{ const file=e.target.files[0]; if(!file) return; const rd=new FileReader(); rd.onload=()=>{ const lines=String(rd.result).split(/\r?\n/); lines.shift(); const map={}; for(const l of lines){ const v=l.split(","); if(v.length<7) continue; const lat=Number(v[v.length-2]),lon=Number(v[v.length-1]); if(!v[0]||!isFinite(lat)||!isFinite(lon)||v[v.length-2]==="") continue; map[v[0]]=[lat,lon,v[2]]; } if(Object.keys(map).length){ AIRPORTS=map; $("dataNote").textContent="Loaded "+Object.keys(map).length+" airports for diversion distances."; } }; rd.readAsText(file); });
+
+renderBoard();
+openFlight(FLIGHTS.find(f=>f.al==="DL"&&f.fn==="1639")||FLIGHTS[0]);
+})();
+</script>
+</body></html>

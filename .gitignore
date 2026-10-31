@@ -1,11 +1,23 @@
-.DS_Store
-node_modules/
+# secrets
 .env
 .env.*
 !.env.example
-*.log
-dist/
-build/
-.venv/
+
+# data (full file too large; never commit)
+data/flights.csv
+
+# runtime output
+runs/
+recordings/*.tmp
+
+# python
 __pycache__/
+.pytest_cache/
+.venv/
+.hypothesis/
+
+# tooling / os
 .vercel
+.DS_Store
+node_modules/
+*.log

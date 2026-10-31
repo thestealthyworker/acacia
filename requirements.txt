@@ -1,0 +1,8 @@
+pandas>=2.0
+pydantic>=2.5
+anthropic>=0.40
+streamlit>=1.35
+python-dotenv>=1.0
+graphviz>=0.20
+pytest>=8.0
+hypothesis>=6.100

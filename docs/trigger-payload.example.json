@@ -1,0 +1,21 @@
+{
+  "_note": "PLACEHOLDER shapes only. Ashiq will provide the real sample as trigger-payload.sample.json, which wins on format. The adapter (HANDOVER 4.4) must accept the real sample and these shapes.",
+  "single_row_reference": {
+    "source": "row_ref",
+    "flight": { "airline": "DL", "flight_number": "1639", "date": "2015-02-26", "origin": "DCA", "dest": "ATL" },
+    "stress": { "low_fuel": false, "tight_crew": false, "corrupt_solver": false }
+  },
+  "explicit_event": {
+    "source": "explicit",
+    "flight": { "airline": "DL", "flight_number": "1639", "date": "2015-02-26", "origin": "DCA", "dest": "ATL" },
+    "injected": [ { "type": "RUNWAY_CLOSED", "ref": "one of two arrival runways", "start": "12:01", "end": "12:50" } ],
+    "declared_emergency": false
+  },
+  "batch": {
+    "source": "batch",
+    "triggers": [
+      { "source": "row_ref", "flight": { "airline": "DL", "flight_number": "1639", "date": "2015-02-26", "origin": "DCA", "dest": "ATL" } }
+    ]
+  },
+  "scan": { "source": "scan", "airport": "ATL", "date": "2015-02-26", "window_min": 180 }
+}
