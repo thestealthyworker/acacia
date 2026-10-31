@@ -160,6 +160,27 @@ def test_e_summary_counts(scenario_e) -> None:
     assert s["knock_on_min"]["after_plans"] >= 0
 
 
+def test_e_summary_after_plans_uses_gate_arrival_vs_scheduled_arrival(scenario_e) -> None:
+    """Metric check: the do-nothing input is ARRIVAL_DELAY (gate arrival - scheduled gate arrival), and
+    the after-plans input is the plan's gate arrival against the same scheduled arrival, once per event."""
+    from acacia import triage
+
+    d, entries = scenario_e
+    s = entries[-1].payload
+    after = 0.0
+    for eid, event in d.events.items():
+        assert to_min(event.hist_arrival) - to_min(event.sched_arrival) == event.hist_delay_min
+        rec = d.records[eid]
+        planned = (event.hist_delay_min if rec.package.get("divert") or not rec.package.get("gate_arrival")
+                   else max(0, to_min(rec.package["gate_arrival"]) - to_min(event.sched_arrival)))
+        if not rec.package.get("divert") and rec.package.get("gate_arrival"):
+            assert to_min(rec.package["gate_arrival"]) == to_min(rec.package["slot"]) + event.taxi_in
+        node = triage.trigger_node(event, d.graph)
+        after += triage.breakdown_of(triage.propagate(d.graph, node, planned))["knock_on_min"] if node else 0
+    assert s["knock_on_min"]["after_plans"] == after
+    assert len(d.events) == len(d.assessments) == 5  # each trigger counted once on both sides
+
+
 def test_e_is_deterministic(store: DataStore, tmp_path: Path, scenario_e) -> None:
     _, entries = scenario_e
     d2 = _dispatcher(store, tmp_path)
