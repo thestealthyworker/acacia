@@ -129,6 +129,7 @@ class Option(BaseModel):
     type: Literal["SLOT", "GATE", "ROUTE"]
     value: str
     demand: int | None = None
+    runway: str | None = None  # ADDED: CAP-9 arrival runway of a SLOT option ("R1")
 
 
 class ConstraintPacket(BaseModel):
@@ -153,6 +154,7 @@ class ResolutionPackage(BaseModel):
     slot: HHMM
     gate: str
     route_change: str | None = None
+    runway: str | None = None  # ADDED: CAP-9 arrival runway of the slot; None = legacy merged stream
     score: float
     score_breakdown: dict[str, float]  # throughput, connections, fuel, turnaround
     satisfies_hard: bool = True
@@ -235,7 +237,7 @@ class Reservation(BaseModel):
     res_id: str
     resource_type: Literal["RUNWAY_SLOT", "GATE"]
     airport: str
-    resource_id: str  # "RWY" or a gate id
+    resource_id: str  # "RWY-R1" (runway slot, CAP-9), legacy "RWY" (every runway) or a gate id
     start: HHMM
     end: HHMM  # slot: start == end
     event_id: str
@@ -280,6 +282,7 @@ class FallbackPlan(BaseModel):
     event_id: str
     slot: HHMM | None = None
     gate: str | None = None
+    runway: str | None = None  # ADDED: CAP-9 arrival runway of the fallback slot
     divert: bool = False
     alternate: str | None = None  # IATA code of the divert alternate
     alternate_distance_mi: float | None = None  # haversine from the destination, statute miles
@@ -327,9 +330,14 @@ class LogEntry(BaseModel):
 # --- ledger view (HANDOVER 18.5) -------------------------------------------------------------
 @runtime_checkable
 class LedgerView(Protocol):
-    def slot_taken(self, airport: str, t: int, exclude_event: str | None = None) -> bool: ...
+    """`runway` (ADDED, CAP-9): None asks about any runway; "R1" only that runway (a legacy
+    "RWY" booking counts on every runway)."""
 
-    def slot_class(self, airport: str, t: int, exclude_event: str | None = None) -> str | None:
+    def slot_taken(self, airport: str, t: int, exclude_event: str | None = None,
+                   runway: str | None = None) -> bool: ...
+
+    def slot_class(self, airport: str, t: int, exclude_event: str | None = None,
+                   runway: str | None = None) -> str | None:
         """ADDED (WAKE-7): wake class of the active slot at t; None when t is free."""
         ...
 
@@ -341,10 +349,12 @@ class LedgerView(Protocol):
 class EmptyLedgerView:
     """A ledger with no bookings: single-event runs and tests."""
 
-    def slot_taken(self, airport: str, t: int, exclude_event: str | None = None) -> bool:
+    def slot_taken(self, airport: str, t: int, exclude_event: str | None = None,
+                   runway: str | None = None) -> bool:
         return False
 
-    def slot_class(self, airport: str, t: int, exclude_event: str | None = None) -> str | None:
+    def slot_class(self, airport: str, t: int, exclude_event: str | None = None,
+                   runway: str | None = None) -> str | None:
         return None
 
     def gate_busy(
@@ -363,6 +373,11 @@ class AtcPrivate(BaseModel):
     min_separation: int = 3  # legacy kit value; wake table in CONSTRAINTS.md 2 supersedes it
     own_class: str = "Large"  # ADDED: CONSTRAINTS.md 2 wake class of this flight
     traffic_classes: dict[int, str] = Field(default_factory=dict)  # ADDED: wake class per traffic time
+    # ADDED (CAP-9, per-runway model): free slots, demand and traffic (time -> wake class) per
+    # arrival runway. Empty = legacy single stream; free_slots/demand/traffic above are then used.
+    free_by_runway: dict[str, list[int]] = Field(default_factory=dict)
+    demand_by_runway: dict[str, dict[int, int]] = Field(default_factory=dict)
+    traffic_by_runway: dict[str, dict[int, str]] = Field(default_factory=dict)
 
 
 class PilotPrivate(BaseModel):

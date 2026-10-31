@@ -47,9 +47,11 @@ def preempt_text(code: str, by: str, why: str, turn: int | None, kept: int, rank
             f"released, re-queued at rank {rank}. {by} is dispatched next.")
 
 
-def hold_text(code: str, outcome: str, slot: str, gate: str, start: str, end: str, turn: int) -> str:
-    return (f"{code}: {outcome} plan HELD: runway slot {slot}, gate {gate} {start}-{end} (turnaround {turn} min). "
-            "Awaiting human sign-off.")
+def hold_text(code: str, outcome: str, slot: str, gate: str, start: str, end: str, turn: int,
+              runway: str | None = None) -> str:
+    on = f" on {runway}" if runway else ""
+    return (f"{code}: {outcome} plan HELD: runway slot {slot}{on}, gate {gate} {start}-{end} (turnaround {turn} "
+            "min). Awaiting human sign-off.")
 
 
 def summary_text(p: dict) -> str:

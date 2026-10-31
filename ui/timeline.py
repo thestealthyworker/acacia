@@ -53,6 +53,13 @@ def _hhmm_list(values: object) -> list[int]:
     return out
 
 
+def _offered(value: object) -> list[int]:
+    """A_H1 slots: a flat list, or per arrival runway {"R1": [...], ...} (CAP-9) merged in one lane."""
+    if isinstance(value, dict):
+        return sorted({t for v in value.values() for t in _hhmm_list(v)})
+    return _hhmm_list(value)
+
+
 def _limits(view: View, event: DisruptionEvent) -> list[tuple[int, str]]:
     found: list[tuple[int, str]] = [(to_min(event.hist_arrival), "historical arrival")]
     p, g = view.packets.get("PILOT"), view.packets.get("GROUND")
@@ -95,7 +102,7 @@ def timeline_data(view: View, event: DisruptionEvent) -> TimelineData | None:
         return None
     eta = to_min(event.eta_landing)
     t0 = (eta - PAD_MIN) // 10 * 10
-    offered = _hhmm_list((hard(atc, "SLOT_IN_SEQUENCE") or {}).get("value"))
+    offered = _offered((hard(atc, "SLOT_IN_SEQUENCE") or {}).get("value"))
     traffic = [t for t in _hhmm_list((atc.get("facts_owned") or {}).get("traffic")) if t >= t0]
     limits = _limits(view, event)
     t1 = max([eta, *offered, *(t for t, _ in limits)]) + PAD_MIN

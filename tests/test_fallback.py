@@ -227,6 +227,7 @@ def test_fallback_with_real_world_passes_the_checker(event, airports, tmp_path) 
     private = build_private(event, None, world, ledger.view())
     plan = plan_fallback(event, private, airports, world=world, ledger_view=ledger.live())
     assert not plan.divert and plan.reason
+    assert plan.runway in world.runways()  # CAP-9: the plan names its arrival runway
     pkg = ResolutionPackage(event_id=event.event_id, package_id="FB", turn=3, slot=plan.slot,
-                            gate=plan.gate, score=0.0, score_breakdown={})
+                            gate=plan.gate, runway=plan.runway, score=0.0, score_breakdown={})
     assert check(pkg, event, private, world, ledger.live()).passed

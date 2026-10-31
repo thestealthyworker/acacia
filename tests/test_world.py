@@ -90,19 +90,20 @@ def _gaps(grid: list[int], lo: int, hi: int) -> list[int]:
 
 
 def test_grid_follows_workbook_arrival_capacity_and_storm_factor() -> None:
-    """CONSTRAINTS.md 2: ATL 90 movements/hr x 50% = 45 arrivals/hr (step 1.33 min), x0.6 in a
-    moderate storm (27/hr, 2.22 min), x0.4 in a severe one (18/hr, 3.33 min)."""
+    """CONSTRAINTS.md 2: ATL 90 movements/hr x 50% = 45 arrivals/hr, x0.6 in a moderate storm
+    (27/hr), x0.4 in a severe one (18/hr). Per-runway model (CAP-9): two arrival runways, each
+    stepping 60 x 2 / R (2.67 / 4.44 / 6.67 min), staggered, so the merged grid lands R per hour."""
     world = AirportWorld("ATL", DATE, [CLOSURE])
-    grid = world.grid()
+    grid = world.grid()  # merged points of R1 and R2
     assert grid[0] == 0 and all(0 <= p < config.MINUTES_PER_DAY for p in grid)
     assert grid == sorted(set(grid))
-    assert grid[:7] == [0, 1, 3, 4, 5, 7, 8]  # 0, 1.33, 2.67, 4, 5.33, 6.67, 8 rounded
+    assert grid[:7] == [0, 1, 3, 4, 5, 7, 8]  # R1 0, 2.67, 5.33, 8 and R2 1.33, 4, 6.67 rounded
     assert len([p for p in grid if 600 <= p < 660]) == 45  # nominal hour
-    assert len([p for p in grid if 720 <= p < 780]) == 27  # moderate storm hour (severity None)
-    assert set(_gaps(grid, 720, 780)) <= {2, 3}
+    assert [len([p for p in world.grid(r) if 720 <= p < 780]) for r in world.runways()] == [14, 14]
+    assert all(set(_gaps(world.grid(r), 730, 780)) <= {4, 5} for r in world.runways())
     severe = AirportWorld("ATL", DATE, [CLOSURE.model_copy(update={"severity": "severe"})])
     assert len([p for p in severe.grid() if 720 <= p < 780]) == 18
-    assert set(_gaps(severe.grid(), 720, 780)) <= {3, 4}
+    assert all(set(_gaps(severe.grid(r), 730, 780)) <= {6, 7} for r in severe.runways())
     assert world.storm_at(720) == "moderate" and severe.storm_at(779) == "severe"
     assert world.storm_at(780) == "none"
     assert world.closure_at(720) and world.closure_at(779) and not world.closure_at(780)
@@ -282,9 +283,15 @@ def test_free_slots_never_violate_wake_against_traffic_or_held_slots(own: str) -
 def test_free_slots_default_class_is_large_and_heavy_is_a_subset_of_separated_points() -> None:
     world = AirportWorld("ATL", DATE, [])
     assert world.free_slots_after(600, 4, EmptyLedgerView()) == world.free_slots_after(600, 4, EmptyLedgerView(), "Large")
-    heavy_ok = [p for p in world.grid() if 600 <= p < 700 and not world.is_traffic(p)
-                and world.is_separated(p, "Heavy", EmptyLedgerView())[0]]
-    assert heavy_ok and all(world.is_separated(p, "Large", EmptyLedgerView())[0] for p in heavy_ok)
+    # Heavy needs at least the Large minimum except behind a Heavy leader (4 nm vs 5 nm), so a
+    # Heavy-separated point with no Heavy leader within reach is Large-separated too (per runway).
+    reach = separation_reach()
+    for rwy in world.runways():
+        heavy_ok = [p for p in world.grid(rwy) if 600 <= p < 700 and not world.is_traffic(p, rwy)
+                    and world.is_separated(p, "Heavy", EmptyLedgerView(), runway=rwy)[0]
+                    and "Heavy" not in {world.traffic_class(q, rwy) for q in range(p - reach, p)}]
+        assert heavy_ok and all(world.is_separated(p, "Large", EmptyLedgerView(), runway=rwy)[0]
+                                for p in heavy_ok)
 
 
 # --- gate pool ---------------------------------------------------------------------------------

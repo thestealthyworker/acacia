@@ -58,7 +58,7 @@ def compute_fallback(event: DisruptionEvent, private: PrivateState, airports: pd
     if plan.divert or plan.slot is None or plan.gate is None:
         return plan
     pkg = ResolutionPackage(event_id=event.event_id, package_id=FALLBACK_PACKAGE_ID, turn=turn,
-                            slot=plan.slot, gate=plan.gate, score=0.0, score_breakdown={})
+                            slot=plan.slot, gate=plan.gate, runway=plan.runway, score=0.0, score_breakdown={})
     return plan.model_copy(update={"check": safe_check(pkg, event, private, world, live)})
 
 
@@ -68,7 +68,8 @@ def fallback_text(plan: FallbackPlan, used: bool) -> str:
         body = f"DIVERT to {where}. {plan.reason}"
     else:
         verdict = "" if plan.check is None else f" Checker {'PASS' if plan.check.passed else 'FAIL'}."
-        body = f"Fallback plan: land {plan.slot}, gate {plan.gate}. {plan.reason}{verdict}"
+        on = f" on {plan.runway}" if plan.runway else ""
+        body = f"Fallback plan: land {plan.slot}{on}, gate {plan.gate}. {plan.reason}{verdict}"
     if used and not plan.divert and plan.check is not None and not plan.check.passed:
         body += " The fallback fails the checker: manual handling required."
     return body
@@ -78,14 +79,16 @@ def _gate_arrival(event: DisruptionEvent, slot: str | None) -> int | None:
     return None if slot is None else to_min(slot) + event.taxi_in
 
 
-def _landing(event: DisruptionEvent, slot: str, gate: str) -> dict:
+def _landing(event: DisruptionEvent, slot: str, gate: str, runway: str | None = None) -> dict:
     """Revised-arrival fields shared by the consensus and the non-divert fallback package."""
     mins, kg = holding(event, slot)
     wake = constraints.wake_class(event.distance)
     arr = to_hhmm(to_min(slot) + event.taxi_in)
-    return {"slot": slot, "gate": gate, "gate_arrival": arr, "divert": False, "holding_min": mins,
-            "holding_fuel_kg": kg, "wake_class": wake, "burn_kg_per_h": constraints.burn_kg_per_h(wake),
-            "flight_plan": f"land {event.flight.dest} {slot}, gate {gate}, at gate {arr}"}
+    on = f" on {runway}" if runway else ""
+    return {"slot": slot, "runway": runway, "gate": gate, "gate_arrival": arr, "divert": False,
+            "holding_min": mins, "holding_fuel_kg": kg, "wake_class": wake,
+            "burn_kg_per_h": constraints.burn_kg_per_h(wake),
+            "flight_plan": f"land {event.flight.dest} {slot}{on}, gate {gate}, at gate {arr}"}
 
 
 def _divert(event: DisruptionEvent, plan: FallbackPlan) -> dict:
@@ -104,7 +107,7 @@ def build_record(event: DisruptionEvent, outcome: str, final: ResolutionPackage 
     fb_arr = None if plan.divert else _gate_arrival(event, plan.slot)
     if outcome == "CONSENSUS" and final is not None:
         plan_arr = _gate_arrival(event, final.slot)
-        package = {**final.model_dump(mode="json"), **_landing(event, final.slot, final.gate)}
+        package = {**final.model_dump(mode="json"), **_landing(event, final.slot, final.gate, final.runway)}
         checker_pass: bool | None = True
     elif plan.divert or plan.slot is None or plan.gate is None:
         plan_arr, checker_pass = None, None
@@ -112,7 +115,7 @@ def build_record(event: DisruptionEvent, outcome: str, final: ResolutionPackage 
     else:
         plan_arr = fb_arr
         checker_pass = plan.check.passed if plan.check is not None else None
-        package = {"package_id": FALLBACK_PACKAGE_ID, **_landing(event, plan.slot, plan.gate),
+        package = {"package_id": FALLBACK_PACKAGE_ID, **_landing(event, plan.slot, plan.gate, plan.runway),
                    "fallback_reason": why}
     hist = to_min(event.hist_arrival)
     return ConsensusRecord(
@@ -137,7 +140,8 @@ def record_text(record: ConsensusRecord, event: DisruptionEvent) -> str:
     if p.get("divert"):
         body = f"Flight plan: {p['flight_plan']}."
     else:
-        body = (f"Revised arrival: land {event.flight.dest} {p['slot']}, gate {p['gate']}, at gate "
+        on = f" on {p['runway']}" if p.get("runway") else ""
+        body = (f"Revised arrival: land {event.flight.dest} {p['slot']}{on}, gate {p['gate']}, at gate "
                 f"{p['gate_arrival']} vs {event.hist_arrival} historically "
                 f"({_rel(record.delta_vs_history_min)}, illustrative). Holding {p['holding_min']} min, "
                 f"{p['holding_fuel_kg']:,.0f} kg fuel at {p['burn_kg_per_h']:,} kg/h.")

@@ -13,7 +13,10 @@ agents declare (acacia.agents.declared). Pilot also states the facts `eta` and `
 from __future__ import annotations
 
 from acacia.agents.base import AgentPrivate, coerce_private
-from acacia.agents.declared import crew_duty_hhmm, gate_notice_value, slot_lead_value, wake_value
+from acacia.agents.declared import (
+    crew_duty_hhmm, gate_notice_value, slot_lead_value, slot_options, slot_sequence_value, traffic_by_runway,
+    wake_value,
+)
 from acacia.constraints import (
     GATE_CHANGE_NOTICE_MIN, GROUND_OVERTIME_RED_LINE_MIN, burn_kg_per_h, commit_time_min,
 )
@@ -21,6 +24,7 @@ from acacia.models import (
     AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, HardLimit,
     Option, PilotPrivate, ReasonCode, ResolutionPackage, SoftPref, Verdict,
 )
+from acacia.runway import atc_demand, atc_has_slot
 from acacia.timeutil import to_hhmm, to_min
 
 PILOT_RED_LINE_PAX = 25
@@ -55,13 +59,13 @@ class RuleATC:
         slots = sorted(a.free_slots)
         return ConstraintPacket(
             event_id=event.event_id, agent=self.role, turn=event.turn,
-            hard=[HardLimit(id="A_H1", rule="SLOT_IN_SEQUENCE", value=[to_hhmm(s) for s in slots]),
+            hard=[HardLimit(id="A_H1", rule="SLOT_IN_SEQUENCE", value=slot_sequence_value(a)),
                   HardLimit(id="A_H2", rule="WAKE_SEPARATION", value=wake_value(a.own_class)),
                   HardLimit(id="A_H3", rule="SLOT_LEAD", value=slot_lead_value(event))],
             soft=[SoftPref(id="A_S1", preference="Use low-demand slots to protect sector throughput",
                            weight=0.7, metric="slot_demand")],
-            options=[Option(type="SLOT", value=to_hhmm(s), demand=a.demand.get(s, 1)) for s in slots],
-            facts_owned={"runway": _runway_text(a), "traffic": _traffic_window(a, slots)},
+            options=slot_options(a),
+            facts_owned=_atc_facts(a, slots),
         )
 
     def decide(self, event: DisruptionEvent, package: ResolutionPackage,
@@ -69,24 +73,31 @@ class RuleATC:
         a: AtcPrivate = coerce_private(self.role, private)  # type: ignore[assignment]
         base = _base(event, package, self.role)
         slot = to_min(package.slot)
-        if slot not in a.free_slots:
+        where = f" on {package.runway}" if package.runway else ""
+        if not atc_has_slot(a, slot, package.runway):
             return _reject(base, ReasonCode.SEPARATION, "A_H1",
-                           f"{package.slot} is not a free slot in my sequence.")
-        contested = ", though it is a contested slot" if a.demand.get(slot, 1) >= 3 else ""
-        return _accept(base, f"Slot {package.slot} fits the sequence{contested}.")
+                           f"{package.slot}{where} is not a free slot in my sequence.")
+        contested = ", though it is a contested slot" if atc_demand(a, slot, package.runway) >= 3 else ""
+        return _accept(base, f"Slot {package.slot}{where} fits the sequence{contested}.")
 
 
 def _runway_text(a: AtcPrivate) -> str:
+    runways = ", ".join(sorted(a.free_by_runway)) or "single stream"
     if not a.closures:
-        return "both runways open"
-    return "single runway until " + to_hhmm(max(end for _, end in a.closures))
+        return f"arrival runways {runways} open"
+    return f"arrival runways {runways} at storm capacity until " + to_hhmm(max(end for _, end in a.closures))
 
 
-def _traffic_window(a: AtcPrivate, slots: list[int]) -> list[str]:
+def _atc_facts(a: AtcPrivate, slots: list[int]) -> dict:
+    """runway status, traffic around the offered slots (merged) and, per runway, traffic_by_runway."""
+    facts: dict = {"runway": _runway_text(a), "traffic": []}
     if not slots:
-        return []
+        return facts
     lo, hi = slots[0] - TRAFFIC_BEFORE_MIN, slots[-1] + TRAFFIC_AFTER_MIN
-    return [to_hhmm(t) for t in sorted(a.traffic) if lo <= t <= hi]
+    facts["traffic"] = [to_hhmm(t) for t in sorted(a.traffic) if lo <= t <= hi]
+    if a.traffic_by_runway:
+        facts["traffic_by_runway"] = traffic_by_runway(a, lo, hi)
+    return facts
 
 
 class RulePilot:

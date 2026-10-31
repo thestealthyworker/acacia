@@ -21,6 +21,7 @@ from acacia.models import (
     ResolutionPackage,
 )
 from acacia.simulate import build_private
+from acacia.runway import atc_slots
 from acacia.timeutil import to_hhmm
 from acacia.triangulate import triangulate
 from acacia.world import AirportWorld
@@ -68,9 +69,9 @@ def _private(free_slots=(740, 748), traffic=(736, 744 + 8), land_by=790, free_fr
     )
 
 
-def _pkg(event, slot: int, gate: str = "A7", pid: str = "P1") -> ResolutionPackage:
+def _pkg(event, slot: int, gate: str = "A7", pid: str = "P1", runway: str | None = None) -> ResolutionPackage:
     return ResolutionPackage(event_id=event.event_id, package_id=pid, turn=2, slot=to_hhmm(slot),
-                             gate=gate, score=0.5, score_breakdown={})
+                             gate=gate, score=0.5, score_breakdown={}, runway=runway)
 
 
 def _rule(result, code: ReasonCode):
@@ -336,20 +337,22 @@ def test_checker_does_not_import_solver() -> None:
 def test_separation_uses_world_wake_check_with_live_ledger(event, ledger) -> None:
     world = AirportWorld("ATL", event.flight.date, event.injected)
     private = build_private(event, None, world, ledger.view())
-    slot, gate = private.atc.free_slots[0], private.ground.assigned_gate
-    ok = _rule(check(_pkg(event, slot, gate), event, private, world, ledger.live()), ReasonCode.SEPARATION)
+    (slot, rwy), gate = atc_slots(private.atc)[0], private.ground.assigned_gate  # CAP-9: per runway
+    ok = _rule(check(_pkg(event, slot, gate, runway=rwy), event, private, world, ledger.live()),
+               ReasonCode.SEPARATION)
     assert ok.passed and "separated" in ok.detail
-    ledger.hold("OTHER", "ATL", slot + 1, "REMOTE-9", slot + 11, slot + 56)  # 1 min behind: < 1.29
-    bad = _rule(check(_pkg(event, slot, gate), event, private, world, ledger.live()), ReasonCode.SEPARATION)
+    ledger.hold("OTHER", "ATL", slot + 1, "REMOTE-9", slot + 11, slot + 56, runway=rwy)  # 1 min behind: < 1.29
+    bad = _rule(check(_pkg(event, slot, gate, runway=rwy), event, private, world, ledger.live()),
+                ReasonCode.SEPARATION)
     assert not bad.passed and "wake" in bad.detail
 
 
 def test_separation_ignores_the_events_own_held_slot(event, ledger) -> None:
     world = AirportWorld("ATL", event.flight.date, event.injected)
     private = build_private(event, None, world, ledger.view())
-    slot, gate = private.atc.free_slots[0], private.ground.assigned_gate
-    ledger.hold(event.event_id, "ATL", slot, gate, slot + TI, slot + TI + private.ground.min_turn)
-    result = check(_pkg(event, slot, gate), event, private, world, ledger.live())
+    (slot, rwy), gate = atc_slots(private.atc)[0], private.ground.assigned_gate
+    ledger.hold(event.event_id, "ATL", slot, gate, slot + TI, slot + TI + private.ground.min_turn, runway=rwy)
+    result = check(_pkg(event, slot, gate, runway=rwy), event, private, world, ledger.live())
     assert _rule(result, ReasonCode.SEPARATION).passed
 
 

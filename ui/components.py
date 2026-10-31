@@ -211,7 +211,8 @@ def agent_cards(view: View, event: DisruptionEvent) -> None:
 def _status(cand: dict, view: View, turn: int | None) -> tuple[str, str]:
     pkg, status = cand["package"], cand.get("status", "")
     sent = view.sent or {}
-    if sent.get("slot") == pkg["slot"] and sent.get("gate") == pkg["gate"] and sent.get("turn") == turn:
+    same = all(sent.get(k) == pkg.get(k) for k in ("slot", "gate", "runway"))  # CAP-9: runway too
+    if same and sent.get("turn") == turn:
         return "sent", "info"
     if status == "DISCARDED":
         return "discarded: " + ", ".join(cand.get("discard", [])), "bad"
@@ -248,12 +249,12 @@ def solver_table(view: View, event: DisruptionEvent) -> None:
             cls = "sent" if label == "sent" else "disc" if kind in ("bad", "muted") else ""
             kg = sb.get("holding_fuel_kg")
             rows.append(f'<tr class="{cls}"><td>{esc(pkg["package_id"])}</td><td>{esc(pkg["slot"])}</td>'
-                        f'<td>{esc(pkg["gate"])}</td><td>{esc(_gate_arr(pkg["slot"], event.taxi_in))}</td>'
+                        f'<td>{esc(pkg.get("runway") or "—")}</td><td>{esc(pkg["gate"])}</td><td>{esc(_gate_arr(pkg["slot"], event.taxi_in))}</td>'
                         f'<td>{pkg.get("score", 0):.2f}</td><td>{_bar(sb)}</td>'
                         f'<td>{"—" if kg is None else f"{kg:,.0f}"}</td><td>{sb.get("overtime_cost_min", 0):g}</td>'
                         f'<td>{chip(label, kind)}</td></tr>')
         legend = "".join(f'<span><i style="background:{c}"></i>{k}</span>' for k, c in BREAKDOWN)
-        _html('<table class="pk"><thead><tr><th>ID</th><th>Slot</th><th>Gate</th><th>At gate</th><th>Score</th>'
+        _html('<table class="pk"><thead><tr><th>ID</th><th>Slot</th><th>Runway</th><th>Gate</th><th>At gate</th><th>Score</th>'
               '<th>Breakdown</th><th>Hold fuel kg</th><th>Overtime cost min</th><th>Status</th></tr></thead>'
               f'<tbody>{"".join(rows)}</tbody></table><div class="legend" style="margin-top:6px">{legend}'
               f'<span>Turn {esc(turn)}{" · corrupted (safety test)" if view.solver.get("corrupted") else ""}</span></div>')
@@ -283,6 +284,8 @@ def _outcome_rows(rec: dict, view: View) -> list[tuple[str, object]]:
     if pkg.get("divert"):
         rows.append(("Divert", f"{pkg.get('alternate')} ({pkg.get('alternate_distance_mi')} mi)"))
     else:
+        if pkg.get("runway"):
+            rows.append(("Runway", pkg["runway"]))  # CAP-9 arrival runway
         rows += [("Gate arrival", pkg.get("gate_arrival")),
                  ("Holding", f"{pkg.get('holding_min')} min, {pkg.get('holding_fuel_kg') or 0:,.0f} kg fuel at "
                              f"{pkg.get('burn_kg_per_h') or 0:,} kg/h"),
