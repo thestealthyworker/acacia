@@ -1,7 +1,8 @@
 """Replay agents: serve recorded LLM responses with no network (HANDOVER 8.3).
 
-Recordings live at recordings/{event_id}/{role}-{step}-{turn}.json (written by LLMAgent with
-record=True). The prompt is rebuilt from the same inputs and its hash compared with the recorded
+Recordings live at recordings/{event_id}/{role}-{step}-{turn}-{prompt hash}.json, plus a legacy
+copy without the hash (written by LLMAgent with record=True). Replay looks up the exact prompt
+first, so stress variants of one event replay their own responses. The prompt is rebuilt from the same inputs and its hash compared with the recorded
 one; a mismatch only warns, so a demo still runs after a prompt tweak. A recorded failure replays
 as AgentTimeout, so the coordinator applies the same default as in the live run.
 """
@@ -44,7 +45,8 @@ class ReplayAgent:
         self.prompt_version = prompt_file_hash(self.role)
 
     def declare(self, event: DisruptionEvent, private: AgentPrivate | dict) -> ConstraintPacket:
-        record = self._load(event.event_id, "declare", event.turn)
+        record = self._load(event.event_id, "declare", event.turn,
+                            build_request(self.role, "declare", config.MODEL, event, private))
         request = build_request(self.role, "declare", record["model"], event, private)
         packet = self._serve(ConstraintPacket, record, request)
         self.last_audit = audit_declaration(self.role, packet, private, event)
@@ -54,12 +56,16 @@ class ReplayAgent:
 
     def decide(self, event: DisruptionEvent, package: ResolutionPackage, private: AgentPrivate | dict,
                own_packet: ConstraintPacket) -> Decision:
-        record = self._load(event.event_id, "decide", package.turn)
+        record = self._load(event.event_id, "decide", package.turn,
+                            build_request(self.role, "decide", config.MODEL, event, private, package, own_packet))
         request = build_request(self.role, "decide", record["model"], event, private, package, own_packet)
         return self._serve(Decision, record, request)
 
-    def _load(self, event_id: str, step: Step, turn: int) -> dict:
-        path = recording_path(self.recordings_dir, event_id, self.role, step, turn)
+    def _load(self, event_id: str, step: Step, turn: int, probe: dict | None = None) -> dict:
+        exact = recording_path(self.recordings_dir, event_id, self.role, step, turn,
+                               prompt_hash(probe)) if probe is not None else None
+        path = exact if exact is not None and exact.exists() else \
+            recording_path(self.recordings_dir, event_id, self.role, step, turn)
         if not path.exists():
             raise RecordingMissingError(
                 f"no recording for {self.role.value} {step} turn {turn} of {event_id} at {path}; "

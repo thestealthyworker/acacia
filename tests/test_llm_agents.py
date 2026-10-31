@@ -357,3 +357,25 @@ def test_private_views_carry_the_workbook_facts_the_prompts_ask_for(event) -> No
     gv = private_view(AgentRole.GROUND, ground, event)
     assert gv["spare_gates"] == 3 and gv["shift_start"] == "05:36"
     assert private_view(AgentRole.GROUND, GROUND, event)["shift_start"] is None
+
+
+def test_stress_variants_of_one_event_replay_their_own_recordings(event, tmp_path) -> None:
+    """Two private states for the same event and turn (e.g. base vs tight crew) must not overwrite
+    each other: replay finds each by its prompt hash and serves its own response, with no warning."""
+    import warnings as _w
+
+    variant = PILOT.model_copy(update={"land_by": PILOT.land_by - 7})
+    recorded = {}
+    for name, priv in (("base", PILOT), ("variant", variant)):
+        packet = RulePilot().declare(event, priv)
+        agent = LLMAgent(AgentRole.PILOT, client=FakeClient([_dump(packet)]), record=True,
+                         recordings_dir=tmp_path)
+        recorded[name] = agent.declare(event, priv)
+    assert recorded["base"] != recorded["variant"]
+    hashed = list((tmp_path / event.event_id).glob("pilot-declare-1-*.json"))
+    assert len(hashed) == 2
+    with _w.catch_warnings():
+        _w.simplefilter("error", ReplayMismatchWarning)
+        replay = ReplayAgent(AgentRole.PILOT, recordings_dir=tmp_path)
+        assert replay.declare(event, PILOT) == recorded["base"]
+        assert replay.declare(event, variant) == recorded["variant"]

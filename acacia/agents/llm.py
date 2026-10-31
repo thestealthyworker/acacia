@@ -187,9 +187,14 @@ def prompt_hash(request: dict) -> str:
     return hashlib.sha256(json.dumps(request, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def recording_path(root: Path | str, event_id: str, role: AgentRole, step: Step, turn: int) -> Path:
+def recording_path(root: Path | str, event_id: str, role: AgentRole, step: Step, turn: int,
+                   phash: str | None = None) -> Path:
+    """Recording file. With a prompt hash the name is unique per prompt, so stress variants of one
+    event (base, corrupt_solver, tight_crew) never overwrite each other; without one it is the
+    legacy {role}-{step}-{turn}.json name."""
     safe_event = re.sub(r"[^A-Za-z0-9_.-]", "_", event_id)
-    return Path(root) / safe_event / f"{AgentRole(role).value.lower()}-{step}-{turn}.json"
+    suffix = f"-{phash[:12]}" if phash else ""
+    return Path(root) / safe_event / f"{AgentRole(role).value.lower()}-{step}-{turn}{suffix}.json"
 
 
 # --- declaration audit ---------------------------------------------------------------------------
@@ -385,12 +390,16 @@ class LLMAgent:
     def _save(self, log: dict) -> None:
         if not self.record:
             return
-        path = recording_path(self.recordings_dir, log["event_id"], self.role, log["step"], log["turn"])
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(log, indent=2, default=str), encoding="utf-8")
-        except OSError:
-            logger.exception("could not write recording %s", path)
+        body = json.dumps(log, indent=2, default=str)
+        paths = [recording_path(self.recordings_dir, log["event_id"], self.role, log["step"], log["turn"],
+                                log.get("prompt_hash"))]
+        paths.append(recording_path(self.recordings_dir, log["event_id"], self.role, log["step"], log["turn"]))
+        for path in paths:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(body, encoding="utf-8")
+            except OSError:
+                logger.exception("could not write recording %s", path)
 
 
 def default_client(timeout: float) -> anthropic.Anthropic:
