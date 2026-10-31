@@ -2,7 +2,8 @@
 
 One st.chat_message per visible log entry. Playback controls mutate the RunState through
 callbacks; a change that starts or stops the timer asks app.py for a full rerun, because
-the fragment's run_every is fixed until then.
+the fragment's run_every is fixed until then. The message box follows the newest entry
+(ui/autoscroll.py) whenever entries arrive, and stays where the reader left it otherwise.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from collections.abc import Sequence
 import streamlit as st
 
 from acacia.models import LogEntry
-from ui import runs
+from ui import autoscroll, runs
 from ui.runs import RunState
 from ui.theme import SINGLE_FLIGHT_SENDERS, chip, colour, esc, sender_avatar, sender_label
 from ui.view import next_speaker
@@ -49,7 +50,12 @@ def _replay(state: RunState) -> None:
 
 
 def playback_controls(state: RunState) -> None:
-    c1, c2, c3, c4 = st.columns(4)
+    with st.container(key="ac-playback"):  # one compact row on phones (theme CSS)
+        _playback_buttons(state)
+
+
+def _playback_buttons(state: RunState) -> None:
+    c1, c2, c3, c4 = st.columns(4, gap="small")
     label, icon = ("Pause", ":material/pause:") if state.playing else ("Play", ":material/play_arrow:")
     c1.button(label, key="pb_play", icon=icon, on_click=_toggle_play, args=(state,), width="stretch",
               disabled=state.at_end, help="Play or pause the channel")
@@ -110,10 +116,14 @@ def channel(state: RunState | None) -> None:
     keep = set(chosen or ())
     if state.error:
         st.error(state.error)
-    with st.container(height=CHANNEL_HEIGHT, border=False):
+    with st.container(height=CHANNEL_HEIGHT, border=False, key="ac-channel"):
+        autoscroll.anchor("channel")
         for e in visible:
             if e.who in keep:
                 render_entry(e)
-        if state.running and state.idx >= len(state.entries):
+        composing = state.running and state.idx >= len(state.entries)
+        if composing:
             who = next_speaker(state.entries) or "Agents"
             st.markdown(f'<div class="composing">{esc(who)} is composing…</div>', unsafe_allow_html=True)
+    autoscroll.follow("channel", f"{state.event.event_id}:{state.mode}:{len(visible)}:{composing}:"
+                                 f"{','.join(sorted(keep))}")

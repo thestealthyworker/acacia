@@ -14,6 +14,8 @@ from acacia.timeutil import to_hhmm, to_min
 from ui.theme import STAGES, chip, colour, esc, heading, scenario_chip, sim_chip
 from ui.view import View, hard
 
+OUTCOME_ANCHOR = "ac-outcome"  # ui/verdict.py links here
+
 CAUSES = (("weather", "Weather", "var(--accent)"), ("late_aircraft", "Late aircraft", "var(--ground)"),
           ("air_system", "Air system", "var(--pilot)"), ("airline", "Airline", "var(--solver)"),
           ("security", "Security", "var(--bad)"))
@@ -287,7 +289,7 @@ def _outcome_rows(rec: dict, view: View) -> list[tuple[str, object]]:
 def outcome_panel(view: View) -> None:
     rec = view.record
     with st.container(border=True):
-        _html(heading("Outcome"))
+        _html(f'<div id="{OUTCOME_ANCHOR}" class="ac-anchor"></div>' + heading("Outcome"))
         if not rec:
             _html('<div class="ac-sub">Appears when the coordinator reaches AWAITING_SIGNOFF.</div>')
             return

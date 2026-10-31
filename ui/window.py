@@ -21,6 +21,7 @@ from ui.constraints_panel import constraints_panel
 from ui.dashboard import event_panels
 from ui.impact_dot import DELAY_FILLS, impact_dot
 from ui.theme import chip, esc, heading
+from ui.verdict import verdict_html
 from ui.window_thread import ORCH, THREAD_KEY, thread_panel
 
 RUN_KEY, SELECTED_KEY, ERROR_KEY, SIGN_ERROR_KEY = "win_run_state", "win_selected", "win_error", "win_sign_error"
@@ -102,7 +103,8 @@ def controls(mode: str, stress: Stress) -> None:
         a, b = st.columns([2.2, 1], vertical_alignment="center")
         a.checkbox("Scenario F: low fuel on the lowest-ranked trigger after the first dispatch", key="win_preempt")
         b.button("Run window", key="win_run", type="primary", width="stretch", on_click=_start, args=(mode, stress),
-                 icon=":material/play_arrow:", help=f"{mode} agents; header stress toggles apply to every trigger")
+                 icon=":material/play_arrow:")  # no hover help: its tooltip covered "Window (min)" (QA fix 8)
+        st.caption(f"{mode} agents; the header stress toggles apply to every trigger.")
         if st.session_state.get(ERROR_KEY):
             st.error(st.session_state[ERROR_KEY])
 
@@ -225,13 +227,15 @@ def selected_event(run: ws.WindowRun, event_id: str) -> None:
     if attempts > 1:
         st.caption(f"Attempt {attempts}: {attempts - 1} earlier attempt(s) were pre-empted; their logs are kept "
                    "in the event thread.")
+    banner = verdict_html(entries) if run.done else None
+    if banner:
+        _html(banner)
     event_panels(entries, run.dispatcher.events[event_id])
     window_signoff(run, event_id)
 
 
 # --- page -------------------------------------------------------------------------------------
-def _left(run: ws.WindowRun | None, mode: str, stress: Stress) -> None:
-    constraints_panel()
+def _left_top(run: ws.WindowRun | None, mode: str, stress: Stress) -> None:
     controls(mode, stress)
     if run is None:
         st.info("Choose an airport window (or a payload list) and press Run window. The dispatcher triages, "
@@ -240,8 +244,11 @@ def _left(run: ws.WindowRun | None, mode: str, stress: Stress) -> None:
     if run.error:
         st.error(run.error)
     trigger_queue(run)
+
+
+def _left_detail(run: ws.WindowRun | None) -> None:
     eid = st.session_state.get(SELECTED_KEY)
-    if eid not in run.dispatcher.events:
+    if run is None or eid not in run.dispatcher.events:
         return
     impact_graph(run, eid)
     booking_ledger(run)
@@ -249,12 +256,19 @@ def _left(run: ws.WindowRun | None, mode: str, stress: Stress) -> None:
 
 
 def render_window(mode: str, stress: Stress) -> None:
+    """Keyed containers let the theme CSS put the channel right after the queue on phones."""
     run: ws.WindowRun | None = st.session_state.get(RUN_KEY)
-    left, right = st.columns([1.45, 1], gap="medium")
-    with left:
-        _left(run, mode, stress)
-    with right:
-        thread_panel(run, _select)
+    with st.container(key="ac-body"):
+        left, right = st.columns([1.45, 1], gap="medium")
+        with left:
+            with st.container(key="ac-l-cons"):
+                constraints_panel()
+            with st.container(key="ac-l-top"):
+                _left_top(run, mode, stress)
+            with st.container(key="ac-l-dash"):
+                _left_detail(run)
+        with right, st.container(key="ac-r-chan"):
+            thread_panel(run, _select)
     if run is not None and run.running:
         time.sleep(POLL_S)
         st.rerun()

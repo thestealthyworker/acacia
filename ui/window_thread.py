@@ -3,7 +3,8 @@
 The channel opens on the dispatcher's own messages (TRIAGE, ImpactAssessment, TriggerQueue,
 CLUSTER, DISPATCH, LEDGER, PREEMPT, SUMMARY) under the sender "Orchestrator", with its own
 colour and filter chip. Each DISPATCH message links into that event's negotiation thread; a
-pre-empted event shows every attempt, each its own verified hash chain.
+pre-empted event shows every attempt, each its own verified hash chain. The thread follows its
+newest entry while the dispatcher drains the queue (ui/autoscroll.py).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from collections.abc import Callable
 import streamlit as st
 
 from acacia.models import LogEntry
+from ui import autoscroll
 from ui import window_state as ws
 from ui.channel import CHANNEL_HEIGHT, render_entry
 from ui.theme import SINGLE_FLIGHT_SENDERS, chip, esc, sender_label
@@ -89,10 +91,13 @@ def thread_panel(run: ws.WindowRun | None, select: Callable[[str], None]) -> Non
     keep = set(chosen or ())
     if run.error:
         st.error(run.error)
-    with st.container(height=CHANNEL_HEIGHT, border=False):
+    with st.container(height=CHANNEL_HEIGHT, border=False, key="ac-win-channel"):
+        autoscroll.anchor("win-channel")
         if key == ORCH:
             _orchestrator(run, keep, select)
         else:
             _event(run, key, keep)
         if run.running:
             st.markdown('<div class="composing">Dispatcher is negotiating…</div>', unsafe_allow_html=True)
+    n = sum(len(c) for c in chains)
+    autoscroll.follow("win-channel", f"{key}:{n}:{run.running}:{','.join(sorted(keep))}")

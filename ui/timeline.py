@@ -20,9 +20,11 @@ RUNWAY = "Runway"
 MAX_GATE_LANES = 4
 PAD_MIN = 20
 LANE_STEP_PX = 34
+LEGEND_COLUMNS = 3  # four columns truncated the longest label (QA fix 8)
+LEGEND_LABEL_LIMIT_PX = 220
 COLOURS = {
     "storm window": "#e5b157", "occupied (simulated)": "#9aa7b1", "unavailable": "#bf3b2b",
-    "turnaround (package under vote)": "#ad5f17", "traffic": "#5a6a77", "offered slot": "#0d7f8f",
+    "turnaround (under vote)": "#ad5f17", "traffic": "#5a6a77", "offered slot": "#0d7f8f",
     "under vote": "#4a4fc2",
 }
 LIMIT_COLOURS = {"fuel limit": "#bf3b2b", "connection deadline": "#4a4fc2", "crew shift end": "#ad5f17",
@@ -83,7 +85,7 @@ def _gate_rows(view: View, event: DisruptionEvent, t0: int) -> tuple[list[str], 
                    or constraints.min_turnaround(event.flight.dest))
         arr = to_min(sent["slot"]) + event.taxi_in
         rows.append({"lane": f"Gate {sent['gate']}", "start": arr, "end": arr + turn,
-                     "kind": "turnaround (package under vote)"})
+                     "kind": "turnaround (under vote)"})
     return lanes, rows
 
 
@@ -117,7 +119,8 @@ def timeline_chart(data: TimelineData) -> alt.LayerChart:
     palette = {**COLOURS, **LIMIT_COLOURS}
     y = alt.Y("lane:N", sort=data.lanes, title=None, scale=alt.Scale(domain=data.lanes))
     colour = alt.Color("kind:N", scale=alt.Scale(domain=list(palette), range=list(palette.values())),
-                       legend=alt.Legend(title=None, orient="bottom", columns=4))
+                       legend=alt.Legend(title=None, orient="bottom", columns=LEGEND_COLUMNS,
+                                         labelLimit=LEGEND_LABEL_LIMIT_PX))
     x_axis = alt.Axis(format="%H:%M", title=None, grid=True)
     bands = alt.Chart(data.bands).mark_bar(opacity=0.55, cornerRadius=2).encode(
         x=alt.X("start:T", axis=x_axis), x2="end:T", y=y, color=colour,

@@ -1,7 +1,9 @@
 """'Constraints & deviations' panel (CONSTRAINTS.md 8): every REGISTRY row, grouped by sheet.
 
-The challenge's rules of play require every changed limit to be stated in the demo, so this
-panel is expanded by default and lists AS_GIVEN, ASSUMED, CHANGED and NOT_MODELLED rows.
+The challenge's rules of play require every changed limit to be stated in the demo, so the
+status counts (AS_GIVEN, ASSUMED, CHANGED, NOT_MODELLED) always stay visible as chips; the full
+row table sits in an expander, collapsed by default so the flight list and the negotiation are
+above the fold (QA fix 4).
 """
 
 from __future__ import annotations
@@ -59,14 +61,20 @@ def _version() -> str:
         return f"unavailable ({exc})"
 
 
-def constraints_panel() -> None:
+def summary_html(counts: dict[str, int]) -> str:
+    chips = "".join(chip(f"{s.replace('_', ' ')} {n}", STATUS_CHIP[s]) for s, n in counts.items())
+    return f'<div class="ac-cons-sum">{chips} <span class="ac-sub ac-mono">constraints {esc(_version())}</span></div>'
+
+
+def constraints_panel(expanded: bool = False) -> None:
     items = list(constraints.REGISTRY)
     counts = status_counts(items)
     deviations = sum(n for s, n in counts.items() if s != "AS_GIVEN")
-    with st.expander(f"Constraints & deviations · {deviations} deviations of {len(items)} rows", expanded=True):
-        summary = "".join(chip(f"{s.replace('_', ' ')} {n}", STATUS_CHIP[s]) for s, n in counts.items())
-        st.markdown(f'<div>{summary} <span class="ac-sub ac-mono">constraints {esc(_version())}</span></div>'
-                    '<div class="ac-sub">Source: challenge2_operational_constraints.xlsx [CHALLENGE]. '
-                    'Every value not used as given is listed here.</div>', unsafe_allow_html=True)
-        with st.container(height=360, border=False):
-            st.markdown(registry_html(items), unsafe_allow_html=True)
+    with st.container(border=True, key="ac-constraints"):
+        st.markdown(summary_html(counts), unsafe_allow_html=True)
+        with st.expander(f"Constraints & deviations · {deviations} deviations of {len(items)} rows",
+                         expanded=expanded):
+            st.markdown('<div class="ac-sub">Source: challenge2_operational_constraints.xlsx [CHALLENGE]. '
+                        'Every value not used as given is listed here.</div>', unsafe_allow_html=True)
+            with st.container(height=360, border=False):
+                st.markdown(registry_html(items), unsafe_allow_html=True)

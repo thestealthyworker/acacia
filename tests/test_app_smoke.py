@@ -24,6 +24,7 @@ from ui.view import build_view
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 DL1639_KEY = "strip-DL1639-2015-02-26-DCA-ATL"
+DL1639_SEL_KEY = "strip-sel-DL1639-2015-02-26-DCA-ATL"  # preselected as the demo at rest
 TIMEOUT_S = 60
 
 
@@ -55,7 +56,7 @@ def test_app_loads_without_exception() -> None:
 
 def test_pick_dl1639_rule_mode_skip_to_end_shows_outcome() -> None:
     at = AppTest.from_file(APP, default_timeout=TIMEOUT_S).run()
-    at.button(key=DL1639_KEY).click().run()
+    at.button(key=DL1639_SEL_KEY).click().run()
     assert not at.exception
     assert at.radio(key="agent_mode").value == "Rule"
     at.button(key="pb_skip").click().run()
@@ -274,3 +275,73 @@ def test_app_window_open_row_and_dispatch_link() -> None:
     link.click().run()
     assert not at.exception
     assert at.selectbox(key="win_thread").value != "orchestrator"  # DISPATCH links into the event thread
+
+
+# --- QA fixes: ready demo, verdict banner, playback on pick, auto-scroll, compact constraints -----------
+from ui import autoscroll  # noqa: E402
+from ui.timeline import COLOURS, LEGEND_LABEL_LIMIT_PX  # noqa: E402
+from ui.verdict import verdict_html  # noqa: E402
+
+
+def _expander(at: AppTest, label: str):
+    return next(e for e in at.expander if label in e.label)
+
+
+def test_default_demo_shows_verdict_and_outcome_at_rest() -> None:
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT_S).run()
+    assert not at.exception
+    assert at.radio(key="agent_mode").value == runs.default_mode(at.session_state["selected_event"])
+    assert at.button(key=DL1639_SEL_KEY)  # DL1639 is the preselected demo
+    text = _all_markdown(at)
+    assert 'class="verdict"' in text and "land ATL" in text and 'href="#ac-outcome"' in text
+    assert 'id="ac-outcome"' in text and "AWAITING_SIGNOFF" in text
+    assert "CONSENSUS" in text or "FALLBACK" in text
+    assert "16 of 16 entries" in text and "Code decides" in text
+    demo = at.session_state["runs"][at.session_state["selected_event"]]
+    assert demo.at_end and not demo.playing  # played to the end: no timer at rest
+
+
+def test_constraints_collapsed_with_chip_summary_visible() -> None:
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT_S).run()
+    assert _expander(at, "Constraints & deviations").proto.expanded is False
+    assert "ac-cons-sum" in _all_markdown(at) and "CHANGED" in _all_markdown(at)
+
+
+def test_picking_another_flight_starts_playback_timer() -> None:
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT_S).run()
+    other = next(b for b in at.button if b.key and b.key.startswith("strip-") and not b.key.startswith("strip-sel-"))
+    other.click().run()
+    assert not at.exception
+    state = at.session_state["runs"][at.session_state["selected_event"]]
+    assert state.event.flight.code in other.key and state.playing and state.idx >= 1
+    assert at.session_state["_ticking"]  # run_every is set on the first rerun after the pick (no stall)
+    assert "Negotiating" in _all_markdown(at)
+
+
+def test_window_mode_runs_and_shows_verdict_for_opened_event() -> None:
+    at = _window_app()
+    at.button(key="win_run").click().run()
+    assert not at.exception
+    next(b for b in at.button if b.key and b.key.startswith("wq-")).click().run()
+    assert not at.exception
+    assert 'class="verdict"' in _all_markdown(at)
+
+
+def test_verdict_html_only_for_finished_runs(entries) -> None:
+    assert verdict_html(entries[:5]) is None
+    html = verdict_html(entries)
+    assert html is not None and "#ac-outcome" in html and "turns" in html
+    assert "kg fuel" in html or "divert" in html
+
+
+def test_autoscroll_script_targets_anchor_and_token() -> None:
+    assert 'id="ac-scroll-channel"' in autoscroll.anchor_html("channel")
+    js = autoscroll.script("channel", "EVT-1:3")
+    assert '"ac-scroll-channel"' in js and '"EVT-1:3"' in js and "scrollHeight" in js
+    assert "catch (e) { return; }" in js  # degrades when the parent page is unreachable
+    assert autoscroll.script("a b", "t") == autoscroll.script("a-b", "t")
+
+
+def test_timeline_legend_labels_fit() -> None:
+    assert "turnaround (under vote)" in COLOURS
+    assert LEGEND_LABEL_LIMIT_PX >= 200
