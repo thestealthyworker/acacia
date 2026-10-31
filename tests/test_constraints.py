@@ -83,3 +83,10 @@ def test_review_deviations_are_listed() -> None:
     assert "next free slot" in rows["KIT-3"].used_value
     assert rows["KIT-5"].status == "ASSUMED" and "0.6" in rows["KIT-5"].used_value
     assert "Heavy" in rows["WAKE-7"].used_value
+
+
+def test_tight_crew_slack_sits_between_the_red_line_and_the_hard_duty_limit() -> None:
+    """KIT-6: scenario D's overtime at the first offered slot must trip G_S1 (> 20), never G_H2 (> 45)."""
+    assert c.GROUND_OVERTIME_RED_LINE_MIN < c.TIGHT_CREW_SLACK_MIN <= c.GROUND_MAX_OVERTIME_MIN
+    row = {item.id: item for item in c.REGISTRY}["KIT-6"]
+    assert row.status == "ASSUMED" and str(c.TIGHT_CREW_SLACK_MIN) in row.used_value

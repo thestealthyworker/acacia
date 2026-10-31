@@ -10,7 +10,8 @@ import pytest
 
 from acacia.agents.factory import make_agents
 from acacia.coordinator import run_all
-from acacia.models import ConsensusRecord, LogEntry, Stress, Verdict
+from acacia import constraints
+from acacia.models import AgentRole, ConsensusRecord, LogEntry, ReasonCode, Stress, Verdict
 from acacia.timeutil import to_min
 from acacia.triangulate import triangulate
 
@@ -92,30 +93,80 @@ def test_c_low_fuel_diverts_to_nearest_alternate(events, dl1639) -> None:
 
 
 # --- D. tight crew ---------------------------------------------------------------------------------------
-def _overtime(rec: ConsensusRecord, event, entries: list[LogEntry]) -> int:
-    ground = next(e.payload for e in entries if e.type == "ConstraintPacket" and e.who == "ground")
+TIGHT = Stress(tight_crew=True)
+RED_LINE = constraints.GROUND_OVERTIME_RED_LINE_MIN
+
+
+def _ground_packet(entries: list[LogEntry]) -> dict:
+    return next(e.payload for e in entries if e.type == "ConstraintPacket" and e.who == "ground")
+
+
+def _overtime_at(slot_min: int, event, entries: list[LogEntry]) -> int:
+    """Crew overtime past the declared G_S1 shift end if the aircraft lands at `slot_min`."""
+    ground = _ground_packet(entries)
     shift_end = to_min(next(s["target"] for s in ground["soft"] if s["id"] == "G_S1"))
-    done = to_min(rec.package["gate_arrival"]) + ground["facts_owned"]["min_turn_min"]
-    return max(0, done - shift_end)
+    return max(0, slot_min + event.taxi_in + ground["facts_owned"]["min_turn_min"] - shift_end)
+
+
+def _first_offered_slot(entries: list[LogEntry]) -> int:
+    atc = next(e.payload for e in entries if e.type == "ConstraintPacket" and e.who == "atc")
+    return min(to_min(o["value"]) for o in atc["options"])
+
+
+def _ground_votes(rec: ConsensusRecord) -> list:
+    return [d for d in rec.decisions if d.agent == AgentRole.GROUND]
+
+
+def _g_s1_rejects(rec: ConsensusRecord) -> list:
+    return [d for d in _ground_votes(rec) if d.verdict == Verdict.REJECT and d.cites == "G_S1"]
+
+
+def _assert_checked(rec: ConsensusRecord) -> None:
+    """Nothing reaches sign-off as a slot plan unless the checker passed it (a divert has no slot)."""
+    assert rec.checker_pass is True or rec.package.get("divert") is True
+
+
+def _tight_events(dl1639, events) -> list:
+    unique = {e.event_id: e for e in [dl1639, *events]}
+    return list(unique.values())
+
+
+def test_d_dl1639_ground_rejects_on_the_overtime_red_line(dl1639) -> None:
+    entries, rec = _run(dl1639, TIGHT)
+    overtime = _overtime_at(_first_offered_slot(entries), dl1639, entries)
+    assert RED_LINE < overtime <= constraints.GROUND_MAX_OVERTIME_MIN  # soft red line, not hard G_H2
+    g_s1 = _g_s1_rejects(rec)
+    assert g_s1 and g_s1[0].turn == 2
+    assert all(d.reason_code == ReasonCode.CREW_DUTY for d in g_s1)
+    assert not any(d.cites == "G_H2" for d in _ground_votes(rec))
+    assert rec.outcome == "FALLBACK" or rec.turns_used == 3
+    _assert_checked(rec)
 
 
 def test_d_tight_crew_rejects_on_g_s1_end_at_turn_three_or_fallback(events, dl1639) -> None:
-    fired = 0
-    for event in [dl1639, *events]:
-        entries, rec = _run(event, Stress(tight_crew=True))
-        g_s1 = [d for d in _rejects(rec) if d.cites == "G_S1"]
-        if g_s1:
-            fired += 1
-            assert rec.outcome == "FALLBACK" or rec.turns_used == 3
+    voted = 0
+    for event in _tight_events(dl1639, events):
+        entries, rec = _run(event, TIGHT)
+        assert RED_LINE < _overtime_at(_first_offered_slot(entries), event, entries) \
+            <= constraints.GROUND_MAX_OVERTIME_MIN, event.event_id
+        assert rec.outcome == "FALLBACK" or rec.turns_used == 3, event.event_id
+        _assert_checked(rec)
         if rec.outcome == "CONSENSUS":
-            assert _overtime(rec, event, entries) <= 20  # Ground's red line holds in any agreed plan
-    assert fired >= 1, "no sample row produced a Ground CREW_DUTY reject citing G_S1"
+            assert _overtime_at(to_min(rec.package["slot"]), event, entries) <= RED_LINE
+        if not _ground_votes(rec):
+            # Ground only votes on a package: an empty feasible set (e.g. every slot past LAND_BY)
+            # goes straight to the fallback without a turn-2 vote.
+            assert rec.outcome == "FALLBACK" and rec.package.get("fallback_reason"), event.event_id
+            continue
+        voted += 1
+        assert _g_s1_rejects(rec), f"{event.event_id}: Ground voted but never rejected on G_S1"
+        assert all(d.reason_code == ReasonCode.CREW_DUTY for d in _g_s1_rejects(rec))
+    assert voted >= 2, "scenario D must reach a Ground vote on DL1639 and at least one other row"
 
 
 def test_d_tight_crew_brings_the_shift_end_forward(dl1639) -> None:
     def shift_end(stress: Stress) -> int:
         entries = run_all(dl1639, stress, make_agents("rule"))
-        ground = next(e.payload for e in entries if e.type == "ConstraintPacket" and e.who == "ground")
-        return to_min(next(s["target"] for s in ground["soft"] if s["id"] == "G_S1"))
+        return to_min(next(s["target"] for s in _ground_packet(entries)["soft"] if s["id"] == "G_S1"))
 
-    assert shift_end(Stress(tight_crew=True)) < shift_end(Stress())
+    assert shift_end(TIGHT) < shift_end(Stress())

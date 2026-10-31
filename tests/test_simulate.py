@@ -200,10 +200,24 @@ def test_ground_shift_duty_and_next_departure(event, world) -> None:
 def test_tight_crew_changes_only_shift(event, world) -> None:
     base = build_private(event, None, world, EMPTY)
     tight = build_private(event, Stress(tight_crew=True), world, EMPTY)
-    assert tight.ground.shift_end == tight.atc.first + event.taxi_in + 45 - 6
+    first_slot = min(tight.atc.free_slots)  # KIT-6: anchored on the first offered slot, not on `first`
+    assert tight.ground.shift_end == first_slot + event.taxi_in + 45 - constraints.TIGHT_CREW_SLACK_MIN
     assert tight.ground.duty_limit == tight.ground.shift_end + 45
     assert tight.ground.next_departure == base.ground.next_departure
     assert tight.pilot == base.pilot and tight.atc == base.atc
+
+
+@pytest.mark.parametrize("shift", [-3, 0, 4, 15, 40])
+def test_tight_crew_overtime_survives_runway_slot_shifts(event, world, monkeypatch, shift) -> None:
+    """KIT-6: however far the runway model moves the first offered slot, its overtime trips G_S1, not G_H2."""
+    real = world.free_slots_after
+    monkeypatch.setattr(world, "free_slots_after",
+                        lambda *a, **k: [s + shift for s in real(*a, **k)])
+    g = build_private(event, Stress(tight_crew=True), world, EMPTY)
+    done = min(g.atc.free_slots) + event.taxi_in + g.ground.min_turn
+    overtime = done - g.ground.shift_end
+    assert constraints.GROUND_OVERTIME_RED_LINE_MIN < overtime <= constraints.GROUND_MAX_OVERTIME_MIN
+    assert done <= g.ground.duty_limit
 
 
 def test_failed_gate_has_no_free_from(event, monkeypatch, world) -> None:
