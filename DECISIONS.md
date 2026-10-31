@@ -69,3 +69,4 @@ One line each: date, who, what changed, why. Newest at the bottom.
 - 2026-10-31, constraints: min turnaround per airport from the workbook (ATL 45) replaces the distance rule everywhere, including graph slack; fixture expectations updated in CONSTRAINTS.md 3.
 - 2026-10-31, constraints: land_by = E + 45 + 5% of AIR_TIME (spare 45 min above 30 min final reserve), replacing E + rand(45..74); holding fuel kg reported per package.
 - 2026-10-31, constraints: contract ADDED fields DisruptionEvent.air_time and decision_time, AtcPrivate.own_class and traffic_classes, ReasonCode.GATE_CHANGE_NOTICE (hard 20 min notice).
+- 2026-10-31, constraints: Injected.severity (moderate|severe) ADDED so the world applies the storm capacity factor without parsing ref text.

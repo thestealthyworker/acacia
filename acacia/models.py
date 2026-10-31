@@ -79,6 +79,7 @@ class Injected(BaseModel):
     ref: str
     start: HHMM
     end: HHMM
+    severity: Literal["moderate", "severe"] | None = None  # ADDED: CONSTRAINTS.md 2 storm factor
 
 
 class Stress(BaseModel):
