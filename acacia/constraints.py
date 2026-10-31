@@ -29,10 +29,13 @@ SEVERE_WEATHER_DELAY_MIN = 45            # CAP-3: severe if WEATHER_DELAY > 45
 APPROACH_SPEED_KT = 140.0                # WAKE-2
 HEAVY_DISTANCE_MI = 2000                 # WAKE-3
 REMOTE_STANDS = 9                        # GATE-2: REMOTE-1..REMOTE_STANDS
+DEFAULT_OWN_CLASS = "Large"              # WAKE-7: default class of a movement with none stated
 UNKNOWN_SLOT_WAKE_CLASS = "Heavy"        # WAKE-7: a held slot with no stored class (most restrictive)
 TRAFFIC_CLASS_MIX = (("Heavy", 0.15), ("Large", 0.80), ("Small", 0.05))  # WAKE-3
 BACKGROUND_LOAD = 0.55                   # CAP-7
 WORLD_GATE_POOL = 8                      # CAP-4
+ARRIVAL_RUNWAY_DIVISOR = 2               # CAP-9: arrival runways = max(1, active_runways // 2)
+RUNWAY_PREFIX = "R"                      # CAP-9: arrival runway ids R1..Rn
 FINAL_RESERVE_MIN = 30                   # FUEL-1
 SPARE_HOLDING_MIN = 45                   # FUEL-2 (above final reserve)
 CONTINGENCY_SHARE = 0.05                 # FUEL-3
@@ -134,6 +137,22 @@ def storm_level(weather_delay_min: int) -> Storm:
 def arrival_rate(iata: str, storm: Storm = "none") -> float:
     """Arrivals per hour: max ops x arrival share x storm factor."""
     return airport_limits(iata).max_ops_per_hour * ARRIVAL_SHARE * STORM_FACTOR[storm]
+
+
+def arrival_runways(iata: str) -> int:
+    """Arrival runways n = max(1, active_runways // 2) (CAP-9, ASSUMED: half the active runways
+    take arrivals). ATL 4 active -> 2; a medium hub (3) or small hub (2) -> 1."""
+    return max(1, airport_limits(iata).active_runways // ARRIVAL_RUNWAY_DIVISOR)
+
+
+def runway_ids(iata: str) -> tuple[str, ...]:
+    """Arrival runway ids "R1".."Rn" (CAP-9)."""
+    return tuple(f"{RUNWAY_PREFIX}{k}" for k in range(1, arrival_runways(iata) + 1))
+
+
+def runway_step(iata: str, storm: Storm = "none") -> float:
+    """Minutes between grid points on one arrival runway: 60 x n / R(t) (ATL nominal 2.67)."""
+    return 60.0 * arrival_runways(iata) / arrival_rate(iata, storm)
 
 
 def wake_class(distance_miles: int | float) -> str:
@@ -255,7 +274,8 @@ REGISTRY: tuple[ConstraintItem, ...] = (
     ConstraintItem("WAKE-3", "wake_separation", "Aircraft wake class", "not in flights.csv",
                    "Heavy if distance > 2000 mi else Large; traffic 15/80/5 Heavy/Large/Small", "ASSUMED"),
     ConstraintItem("WAKE-4", "wake_separation", "Same-runway scope", "per runway",
-                   "applied across the merged arrival stream", "CHANGED", "conservative"),
+                   "as given: between consecutive arrivals on the same runway only", "AS_GIVEN",
+                   "per-runway arrival model (CAP-9); was CHANGED (merged stream) before"),
     ConstraintItem("WAKE-5", "wake_separation", "Super (A380) pairs", "6-8 nm", "no A380 in data", "NOT_MODELLED"),
     ConstraintItem("WAKE-6", "wake_separation", "Departure min_time_s", "60-180 s", "arrivals only", "NOT_MODELLED"),
     ConstraintItem("FUEL-1", "fuel_and_crew", "Final fuel reserve", "30 min holding", "never planned below", "AS_GIVEN"),
@@ -280,6 +300,11 @@ REGISTRY: tuple[ConstraintItem, ...] = (
     ConstraintItem("WAKE-7", "wake_separation", "Wake class of other negotiated flights", "not stated",
                    "the class stored on the held runway slot (wake_class(distance)); Heavy when none is stored",
                    "ASSUMED", "unknown class read as Heavy, the most restrictive class produced"),
+    ConstraintItem("CAP-9", "airport_capacity", "Arrival runways", "active_runways per airport (ATL 4)",
+                   "max(1, active_runways // 2) arrival runways R1..Rn (ATL 2); each has its own grid "
+                   "step 60 x n / R(t) (ATL 2.67 min nominal), staggered by 60 / R, its own 55% "
+                   "background traffic and wake classes", "ASSUMED",
+                   "half the active runways land arrivals; the other half depart (not modelled)"),
     ConstraintItem("CAP-8", "airport_capacity", "Storm severity when not given", "not stated",
                    "moderate (x0.6) unless the injected event says severe", "ASSUMED"),
     ConstraintItem("FUEL-5", "fuel_and_crew", "Fuel utility span", "not stated",

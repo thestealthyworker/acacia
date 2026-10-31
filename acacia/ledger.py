@@ -5,6 +5,9 @@ memory and is appended, one line per change, to `runs/ledger-{date}.jsonl`; an e
 is replayed on startup. Gate intervals are half-open [start, end), so back-to-back use of one
 gate is allowed. A hold never silently overwrites: any conflict raises `DoubleBookingError`
 and nothing is written.
+
+Runway slots are per arrival runway (CAP-9): resource_id "RWY-R1". A query with runway=None asks
+about any runway; a legacy "RWY" booking (no runway) occupies every runway.
 """
 
 from __future__ import annotations
@@ -18,6 +21,17 @@ from acacia.models import LedgerView, Reservation
 from acacia.timeutil import to_hhmm, to_min
 
 ACTIVE = ("HELD", "COMMITTED")
+RUNWAY_RESOURCE = "RWY"  # legacy id (every runway); per runway: "RWY-R1"
+
+
+def runway_resource(runway: str | None) -> str:
+    """Ledger resource_id of a runway slot: "RWY-R1", or the legacy "RWY" when runway is None."""
+    return f"{RUNWAY_RESOURCE}-{runway}" if runway else RUNWAY_RESOURCE
+
+
+def _on_runway(res: Reservation, runway: str | None) -> bool:
+    """A slot reservation counts on `runway` when it is booked there or carries no runway."""
+    return runway is None or res.resource_id in (RUNWAY_RESOURCE, runway_resource(runway))
 
 
 class DoubleBookingError(ValueError):
@@ -49,15 +63,20 @@ class _View:
             and r.event_id != exclude_event
         ]
 
-    def slot_taken(self, airport: str, t: int, exclude_event: str | None = None) -> bool:
-        return any(to_min(r.start) == t for r in self._active(airport, "RUNWAY_SLOT", exclude_event))
+    def _slots_at(self, airport: str, t: int, exclude_event: str | None, runway: str | None) -> list[Reservation]:
+        return [r for r in self._active(airport, "RUNWAY_SLOT", exclude_event)
+                if to_min(r.start) == t and _on_runway(r, runway)]
 
-    def slot_class(self, airport: str, t: int, exclude_event: str | None = None) -> str | None:
-        """Wake class of the active slot at t (Heavy when none was stored); None when t is free."""
-        for r in self._active(airport, "RUNWAY_SLOT", exclude_event):
-            if to_min(r.start) == t:
-                return r.wake_class or constraints.UNKNOWN_SLOT_WAKE_CLASS
-        return None
+    def slot_taken(self, airport: str, t: int, exclude_event: str | None = None,
+                   runway: str | None = None) -> bool:
+        return bool(self._slots_at(airport, t, exclude_event, runway))
+
+    def slot_class(self, airport: str, t: int, exclude_event: str | None = None,
+                   runway: str | None = None) -> str | None:
+        """Wake class of the active slot at t on `runway` (any runway when None; Heavy when no
+        class was stored); None when t is free."""
+        slots = self._slots_at(airport, t, exclude_event, runway)
+        return (slots[0].wake_class or constraints.UNKNOWN_SLOT_WAKE_CLASS) if slots else None
 
     def gate_busy(
         self, airport: str, gate: str, start: int, end: int, exclude_event: str | None = None
@@ -121,23 +140,26 @@ class Ledger:
     # --- writes -----------------------------------------------------------------------------
     def hold(
         self, event_id: str, airport: str, slot: int, gate: str, gate_start: int, gate_end: int,
-        wake_class: str | None = None,
+        wake_class: str | None = None, runway: str | None = None,
     ) -> list[Reservation]:
-        """HELD runway slot at `slot` (carrying the flight's `wake_class`, WAKE-7) and gate
-        [gate_start, gate_end). Raises on conflict."""
+        """HELD runway slot at `slot` on `runway` (resource "RWY-R1"; legacy "RWY" when None, which
+        blocks every runway), carrying the flight's `wake_class` (WAKE-7), and gate
+        [gate_start, gate_end). Raises on conflict: the same minute on the same runway, or a gate
+        overlap."""
         self._validate_hold(event_id, airport, slot, gate, gate_start, gate_end)
         if any(_is_active(r) for r in self._rows if r.event_id == event_id):
             raise LedgerStateError(f"{event_id} already holds reservations; release first")
         live = self.live()
-        if live.slot_taken(airport, slot, exclude_event=event_id):
-            raise DoubleBookingError(f"slot {airport} {to_hhmm(slot)} is already booked")
+        if live.slot_taken(airport, slot, exclude_event=event_id, runway=runway):
+            where = f" on {runway}" if runway else ""
+            raise DoubleBookingError(f"slot {airport} {to_hhmm(slot)}{where} is already booked")
         if live.gate_busy(airport, gate, gate_start, gate_end, exclude_event=event_id):
             raise DoubleBookingError(
                 f"gate {airport} {gate} {to_hhmm(gate_start)}-{to_hhmm(gate_end)} overlaps a booking"
             )
         end_wire = min(gate_end, config.DAY_END)  # HH:MM cannot express 24:00
         created = [
-            self._add(event_id, "RUNWAY_SLOT", airport, "RWY", slot, slot, wake_class),
+            self._add(event_id, "RUNWAY_SLOT", airport, runway_resource(runway), slot, slot, wake_class),
             self._add(event_id, "GATE", airport, gate, gate_start, end_wire),
         ]
         return [r.model_copy() for r in created]

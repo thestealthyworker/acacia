@@ -1,42 +1,42 @@
 """Shared airport world (FABLE_ADDENDUM 4, HANDOVER 18.2, PLAN 2.A.1 and 2.A.2, CONSTRAINTS.md 2).
 
-The runway grid follows the workbook arrival capacity: points step 60 / R(t) minutes
-(accumulated as a float, rounded to whole minutes, duplicates dropped), where R is 50% of the
-airport's max runway movements per hour, x0.6 / x0.4 inside a moderate / severe storm window
-(a RUNWAY_CLOSED injected event). Each traffic point carries a seeded wake class
-(Heavy/Large/Small 15/80/5), drawn from its own rng so the gate draws do not depend on it.
+Per-runway arrival model (CAP-9): the airport has n = max(1, active_runways // 2) arrival
+runways "R1".."Rn" (`acacia.runway.Runway`). Each has its own grid with step 60 x n / R(t), where
+R is 50% of the airport's max runway movements per hour, x0.6 / x0.4 inside a moderate / severe
+storm window (a RUNWAY_CLOSED injected event), plus its own seeded background traffic (55%) and
+wake classes (Heavy/Large/Small 15/80/5).
 
-Wake separation (CONSTRAINTS.md 2): a point is separated for an aircraft of `own_class` when it
-is at least `constraints.wake_minutes` behind the nearest earlier movement and ahead of the
-nearest later one. Movements are background traffic (their seeded class) and other events'
-HELD/COMMITTED runway slots read through the ledger view (their stored class, WAKE-7). The rule is
-applied across the merged arrival stream (WAKE-4). `free_slots_after` returns only such points.
+Wake separation (CONSTRAINTS.md 2, WAKE-4 as given): an arrival of `own_class` at t on runway r
+is separated when it is at least `constraints.wake_minutes` behind the nearest earlier movement
+on r and ahead of the nearest later one. Movements are r's background traffic and other events'
+HELD/COMMITTED slots on r read through the ledger view (their stored class, WAKE-7).
+`free_slots_after(..., runway=r)` returns only such points. Every runway method takes
+`runway=None` for the merged stream of all runways (the old conservative model).
 
-One `AirportWorld` per (airport, date, injected set): a runway grid with background traffic, a
-pool of `constraints.WORLD_GATE_POOL` gates with background busy intervals (CAP-4), and
-equipment-failure intervals. It is built
-once from the full injected list and cached; nothing here calls an LLM or reads the ledger
-except through the `LedgerView` the caller passes in.
+One `AirportWorld` per (airport, date, injected set): the runways, a pool of
+`constraints.WORLD_GATE_POOL` gates with background busy intervals (CAP-4), and
+equipment-failure intervals. It is built once from the full injected list and cached; nothing
+here calls an LLM or reads the ledger except through the `LedgerView` the caller passes in.
 
 Times are int minutes after local midnight; intervals are half-open [start, end).
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Iterable, Sequence
-from functools import lru_cache
 
 from acacia import config, constraints
 from acacia.models import Injected, LedgerView
+from acacia.runway import (  # noqa: F401  (re-exported for simulate, checker and tests)
+    TRAFFIC_PROBABILITY, WAKE_CLASSES, Runway, held_slot_class, separation_reach, separation_verdict,
+    slot_taken,
+)
 from acacia.timeutil import to_min
 
 Interval = tuple[int, int]
 
-TRAFFIC_PROBABILITY = constraints.BACKGROUND_LOAD  # CAP-7
 DEFAULT_STORM = "moderate"  # CAP-8: a RUNWAY_CLOSED window without a severity
-OTHER_EVENT_CLASS = "Large"  # default own class and fallback traffic class; held slots: held_slot_class
-WAKE_CLASSES = ("Super", "Heavy", "Large", "Small")
+OTHER_EVENT_CLASS = constraints.DEFAULT_OWN_CLASS  # default own and traffic class; held slots: held_slot_class
 GATE_COUNT = constraints.WORLD_GATE_POOL  # CAP-4
 GATE_NUMBER_RANGE = (1, 30)
 BUSY_COUNT_RANGE = (2, 4)
@@ -69,29 +69,6 @@ def _contains(intervals: Sequence[Interval], t: int) -> bool:
     return any(s <= t < e for s, e in intervals)
 
 
-@lru_cache(maxsize=1)
-def separation_reach() -> int:
-    """Whole minutes that cover the widest workbook wake minimum: movements further away than
-    this can never violate separation, so only this window is scanned."""
-    return math.ceil(max(constraints.wake_minutes(a, b) for a in WAKE_CLASSES for b in WAKE_CLASSES))
-
-
-def _slot_taken(view: LedgerView, airport: str, t: int, exclude_event: str | None) -> bool:
-    if exclude_event is None:
-        return view.slot_taken(airport, t)
-    return view.slot_taken(airport, t, exclude_event=exclude_event)
-
-
-def held_slot_class(view: LedgerView, airport: str, t: int, exclude_event: str | None = None) -> str | None:
-    """Wake class of another event's held/committed slot at t (WAKE-7); None when t is free.
-    A view without `slot_class`, or a slot with no stored class, reads as Heavy (most restrictive)."""
-    if not _slot_taken(view, airport, t, exclude_event):
-        return None
-    reader = getattr(view, "slot_class", None)
-    cls = reader(airport, t, exclude_event=exclude_event) if callable(reader) else None
-    return cls or constraints.UNKNOWN_SLOT_WAKE_CLASS
-
-
 def _gate_letter(airport: str) -> str:
     return "A" if airport == "ATL" else airport[0].upper()
 
@@ -110,10 +87,12 @@ class AirportWorld:
         )
         self._storms = [(to_min(i.start), to_min(i.end), i.severity or DEFAULT_STORM)
                         for i in self._injected if i.type == "RUNWAY_CLOSED"]
+        self._runways: dict[str, Runway] = {
+            rid: Runway(self.airport, self.date, rid, k, self.storm_at)
+            for k, rid in enumerate(constraints.runway_ids(self.airport))
+        }
+        self._merged: list[int] = sorted({p for r in self._runways.values() for p in r.grid})
         rng = config.seeded_rng(config.seed_key("world", self.airport, self.date))
-        self._grid: list[int] = self._build_grid()
-        self._traffic: dict[int, bool] = {p: rng.random() < TRAFFIC_PROBABILITY for p in self._grid}
-        self._classes: dict[int, str] = self._draw_classes()
         self._gates: list[str] = self._draw_gates(rng)
         self._busy: dict[str, list[Interval]] = {g: self._draw_busy(rng) for g in self._gates}
         self._failed: dict[str, list[Interval]] = {g: [] for g in self._gates}
@@ -124,29 +103,6 @@ class AirportWorld:
         """Storm level at t: the most severe RUNWAY_CLOSED window containing t, else "none"."""
         levels = {sev for s, e, sev in self._storms if s <= t < e}
         return "severe" if "severe" in levels else "moderate" if levels else "none"
-
-    def _build_grid(self) -> list[int]:
-        grid: list[int] = []
-        point = 0.0
-        while point < config.MINUTES_PER_DAY:
-            minute = int(point + 0.5)
-            if minute < config.MINUTES_PER_DAY and (not grid or minute > grid[-1]):
-                grid.append(minute)
-            point += 60.0 / constraints.arrival_rate(self.airport, self.storm_at(minute))
-        return grid
-
-    def _draw_classes(self) -> dict[int, str]:
-        rng = config.seeded_rng(config.seed_key("world-class", self.airport, self.date))
-        out: dict[int, str] = {}
-        for p in self._grid:
-            u, acc = rng.random(), 0.0
-            out[p] = constraints.TRAFFIC_CLASS_MIX[-1][0]
-            for label, share in constraints.TRAFFIC_CLASS_MIX:
-                acc += share
-                if u < acc:
-                    out[p] = label
-                    break
-        return out
 
     def _draw_gates(self, rng) -> list[str]:
         low, high = GATE_NUMBER_RANGE
@@ -176,8 +132,22 @@ class AirportWorld:
             self._failed[gate] = merge_intervals([*self._failed[gate], (start, end)])
 
     # --- runway ------------------------------------------------------------------------------
-    def grid(self) -> list[int]:
-        return list(self._grid)
+    def runways(self) -> list[str]:
+        """Arrival runway ids "R1".."Rn" (CAP-9)."""
+        return list(self._runways)
+
+    def _runway(self, runway: str) -> Runway:
+        try:
+            return self._runways[runway]
+        except KeyError:
+            raise KeyError(f"unknown runway {runway!r} at {self.airport} (have {self.runways()})") from None
+
+    def _selected(self, runway: str | None) -> list[Runway]:
+        return list(self._runways.values()) if runway is None else [self._runway(runway)]
+
+    def grid(self, runway: str | None = None) -> list[int]:
+        """Grid points of `runway`; None: the merged points of every runway."""
+        return list(self._merged) if runway is None else list(self._runway(runway).grid)
 
     def closures(self) -> list[Interval]:
         return list(self._closures)
@@ -185,69 +155,64 @@ class AirportWorld:
     def closure_at(self, t: int) -> bool:
         return _contains(self._closures, t)
 
-    def traffic_class(self, t: int) -> str | None:
-        """Seeded wake class of the background movement at t (WAKE-3); None when t carries none."""
-        return self._classes.get(t) if self._traffic.get(t, False) else None
+    def traffic_class(self, t: int, runway: str | None = None) -> str | None:
+        """Seeded wake class of the background movement at t on `runway` (WAKE-3); with None the
+        first runway that has one; None when t carries none."""
+        return next((c for r in self._selected(runway) if (c := r.traffic_class(t)) is not None), None)
 
-    def is_traffic(self, t: int) -> bool:
-        return self._traffic.get(t, False)
+    def is_traffic(self, t: int, runway: str | None = None) -> bool:
+        return any(r.is_traffic(t) for r in self._selected(runway))
 
-    def traffic_times(self, start: int, end: int) -> list[int]:
-        """Grid points in [start, end) that carry background traffic."""
-        return [p for p in self._grid if start <= p < end and self._traffic[p]]
+    def traffic_times(self, start: int, end: int, runway: str | None = None) -> list[int]:
+        """Grid points in [start, end) that carry background traffic on `runway` (None: any)."""
+        return [p for p in self.grid(runway) if start <= p < end and self.is_traffic(p, runway)]
 
-    def _movements_near(self, t: int, view: LedgerView, exclude_event: str | None) -> dict[int, str]:
-        """Traffic and other events' held slots within the separation reach of t, by class."""
+    def _movements_near(self, t: int, view: LedgerView, exclude_event: str | None,
+                        runway: str | None) -> dict[int, str]:
+        """Traffic and other events' held slots on `runway` within the separation reach of t."""
         reach = separation_reach()
         out: dict[int, str] = {}
         for p in range(max(0, t - reach), min(config.MINUTES_PER_DAY, t + reach + 1)):
-            cls = self.traffic_class(p) or held_slot_class(view, self.airport, p, exclude_event)
+            cls = self.traffic_class(p, runway) or held_slot_class(view, self.airport, p, exclude_event, runway)
             if cls is not None:
                 out[p] = cls
         return out
 
     def is_separated(
-        self, t: int, own_class: str, view: LedgerView, exclude_event: str | None = None
+        self, t: int, own_class: str, view: LedgerView, exclude_event: str | None = None,
+        runway: str | None = None,
     ) -> tuple[bool, str]:
-        """Whether an arrival of `own_class` at t keeps the workbook wake minimum to the nearest
-        earlier and later movement (traffic or another event's held slot). Returns (ok, detail);
-        `exclude_event` leaves that event's own slots out (re-checks of a held package)."""
+        """Whether an arrival of `own_class` at t on `runway` keeps the workbook wake minimum to the
+        nearest earlier and later movement on that runway (traffic or another event's held slot).
+        Returns (ok, detail); `exclude_event` leaves that event's own slots out (re-checks of a held
+        package). runway=None checks the merged stream of every runway (conservative)."""
         if not isinstance(own_class, str) or not own_class:
             raise ValueError(f"own_class must be a non-empty wake class, got {own_class!r}")
-        near = self._movements_near(t, view, exclude_event)
-        earlier = [p for p in near if p <= t]
-        later = [p for p in near if p > t]
-        notes: list[str] = []
-        if earlier:
-            lead = max(earlier)
-            need = constraints.wake_minutes(near[lead], own_class)
-            if t - lead < need:
-                return False, f"{t - lead} min behind {near[lead]} at {lead}, need {need:.2f}"
-            notes.append(f"{t - lead} min behind {near[lead]} at {lead} (need {need:.2f})")
-        if later:
-            follow = min(later)
-            need = constraints.wake_minutes(own_class, near[follow])
-            if follow - t < need:
-                return False, f"{follow - t} min ahead of {near[follow]} at {follow}, need {need:.2f}"
-            notes.append(f"{follow - t} min ahead of {near[follow]} at {follow} (need {need:.2f})")
-        return True, "separated: " + ("; ".join(notes) or "no movement within reach")
+        if runway is not None:
+            self._runway(runway)
+        return separation_verdict(t, own_class, self._movements_near(t, view, exclude_event, runway))
+
+    def _eligible(self, t: int, view: LedgerView, own_class: str, runway: str | None) -> Iterable[int]:
+        return (
+            p for p in self.grid(runway)
+            if p >= t and not self.is_traffic(p, runway) and not slot_taken(view, self.airport, p, None, runway)
+            and self.is_separated(p, own_class, view, runway=runway)[0]
+        )
 
     def free_slots_after(
-        self, t: int, n: int, view: LedgerView, own_class: str = OTHER_EVENT_CLASS
+        self, t: int, n: int, view: LedgerView, own_class: str = OTHER_EVENT_CLASS,
+        runway: str | None = None,
     ) -> list[int]:
-        """Up to n free, wake-separated grid points >= t for an arrival of `own_class`, skipping
-        rand(0..1) eligible points between returned slots (the seeded skip)."""
+        """Up to n free, wake-separated grid points >= t on `runway` for an arrival of
+        `own_class`, skipping rand(0..1) eligible points between returned slots (the seeded skip,
+        key suffixed with the runway). runway=None: the merged stream (legacy, conservative)."""
         if n <= 0:
             return []
-        eligible = (
-            p for p in self._grid
-            if p >= t and not self._traffic[p] and not view.slot_taken(self.airport, p)
-            and self.is_separated(p, own_class, view)[0]
-        )
-        rng = config.seeded_rng(config.seed_key("slots", self.airport, self.date, t))
+        parts = ("slots", self.airport, self.date, t) + (() if runway is None else (runway,))
+        rng = config.seeded_rng(config.seed_key(*parts))
         slots: list[int] = []
         skip = 0
-        for point in eligible:
+        for point in self._eligible(t, view, own_class, runway):
             if skip > 0:
                 skip -= 1
                 continue
