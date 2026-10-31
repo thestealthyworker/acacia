@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 EARTH_RADIUS_MI = 3958.8
 REMOTE_STAND = "REMOTE-1"
-REMOTE_STANDS = 9
+REMOTE_STANDS = constraints.REMOTE_STANDS  # GATE-2
 
 
 def haversine_mi(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

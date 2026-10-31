@@ -74,3 +74,12 @@ def test_workbook_numbers_used_outside_the_loader_come_from_it() -> None:
 
     assert solver.FUEL_SPAN_MIN == c.SPARE_HOLDING_MIN
     assert solver.OVERTIME_COST_FACTOR == c.OVERTIME_COST_FACTOR
+
+
+def test_review_deviations_are_listed() -> None:
+    """Validator FINAL: every rule change found in review has a REGISTRY row the UI renders."""
+    rows = {item.id: item for item in c.REGISTRY}
+    assert "injected" in rows["PLAY-1"].used_value
+    assert "next free slot" in rows["KIT-3"].used_value
+    assert rows["KIT-5"].status == "ASSUMED" and "0.6" in rows["KIT-5"].used_value
+    assert "Heavy" in rows["WAKE-7"].used_value

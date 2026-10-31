@@ -240,3 +240,11 @@ def test_rule_packets_give_holding_fuel_and_overtime_cost(event) -> None:
     c = next(c for c in r.all if c.package.slot == "12:20" and c.package.gate == "A12")
     assert c.package.score_breakdown["holding_fuel_kg"] == round((740 - 731) * 2400 / 60, 1)
     assert c.package.score_breakdown["overtime_cost_min"] == 0.0
+
+
+def test_ground_red_line_comes_from_the_constraints_registry() -> None:
+    """CREW-3: the rule Ground red line is constraints.GROUND_OVERTIME_RED_LINE_MIN, not a copy."""
+    from acacia import constraints
+    from acacia.agents import rule
+
+    assert rule.GROUND_RED_LINE_OVERTIME == constraints.GROUND_OVERTIME_RED_LINE_MIN

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from acacia import constraints
+from acacia import config, constraints
 from acacia.agents.factory import make_agents
 from acacia.coordinator import run_all
 from acacia.data import DataStore
@@ -124,3 +124,153 @@ def test_timeline_data_and_chart(entries, dl1639) -> None:
 def test_default_mode_without_recordings() -> None:
     assert runs.default_mode("EVT-NOPE0000") == "Rule"
     assert runs.default_mode(None) == "Rule"
+
+
+# --- airport window mode (HANDOVER 13 multi-trigger additions, scenario E/F) ------------------------
+from ui import window_state as ws  # noqa: E402
+from ui.impact_dot import fill_for, impact_dot  # noqa: E402
+
+FIXTURE_CODES = {"DL201", "DL202", "DL203", "DL204", "DL205"}
+
+
+@pytest.fixture(scope="module")
+def fixture_store() -> DataStore:
+    return ws.load_store(ws.SOURCE_FIXTURE)
+
+
+@pytest.fixture(scope="module")
+def window_run(fixture_store) -> ws.WindowRun:
+    run = ws.prepare(fixture_store, ws.SOURCE_FIXTURE, "Rule", Stress(),
+                     scan=(ws.FIXTURE_AIRPORT, ws.FIXTURE_DATE, ws.DEFAULT_WINDOW))
+    return ws.start(run)
+
+
+def test_default_source_is_synthetic_fixture_without_flights_csv() -> None:
+    if ws.has_full_flights():
+        pytest.skip("data/flights.csv present")
+    assert ws.default_source() == ws.SOURCE_FIXTURE
+    assert ws.default_date(ws.SOURCE_FIXTURE) == ws.FIXTURE_DATE
+    assert "synthetic" in ws.source_label(ws.SOURCE_FIXTURE, ws.load_store(ws.SOURCE_FIXTURE))
+
+
+def test_parse_payloads_shapes() -> None:
+    items, scan = ws.parse_payloads(ws.example_payloads(ws.SOURCE_FIXTURE))
+    assert scan is None and len(items) == 5
+    items, scan = ws.parse_payloads('{"source": "scan", "airport": "atl", "date": "2015-03-12", "window_min": 90}')
+    assert items == [] and scan == ("ATL", "2015-03-12", 90)
+    items, _ = ws.parse_payloads('{"source": "batch", "triggers": [{"flight": "DL201", "date": "2015-03-12"}]}')
+    assert items == [{"flight": "DL201", "date": "2015-03-12"}]
+    for bad in ("not json", "[1, 2]", "[]", "3"):
+        with pytest.raises(ws.WindowInputError):
+            ws.parse_payloads(bad)
+
+
+def test_window_run_drains_fixture_queue(window_run) -> None:
+    assert window_run.done and window_run.error is None and window_run.synthetic
+    q = ws.queue(window_run)
+    assert q is not None and {it.flight_no for it in q.items} == FIXTURE_CODES
+    assert [it.rank for it in q.items] == [1, 2, 3, 4, 5]
+    assert all(it.status in ("AWAITING_SIGNOFF", "REJECTED") for it in q.items)
+    orch = ws.orchestrator_entries(window_run)
+    assert ws.chain_ok(orch) and orch[-1].type == "SUMMARY" and ws.summary(window_run) is not None
+    for it in q.items:
+        seg = ws.event_entries(window_run, it.event_id)
+        assert seg and ws.chain_ok(seg)
+
+
+def test_impact_parts_sum_to_score_and_capacity_line(window_run) -> None:
+    d = window_run.dispatcher
+    for eid, a in d.assessments.items():
+        parts = ws.impact_parts(a)
+        assert [p[0] for p in parts] == list(config.IMPACT_POLICY)
+        assert sum(p[3] for p in parts) == pytest.approx(a.impact_score)
+        line = ws.capacity_line(d.events[eid])
+        assert line.startswith("ATL 90 mvts/h · 45 arr/h")
+        storm = ws.storm_of(d.events[eid])
+        assert (f"×{constraints.STORM_FACTOR[storm]:g}" in line)
+
+
+def test_impact_dot_rotation_solid_connection_dashed(window_run) -> None:
+    from acacia import triage
+
+    d = window_run.dispatcher
+    eid = next(e for e, ev in d.events.items() if ev.flight.code == "DL201")
+    a, node = d.assessments[eid], triage.trigger_node(d.events[eid], d.graph)
+    dot = impact_dot(a, node, d.graph, "DL201")
+    assert dot.startswith("digraph") and "rankdir=LR" in dot and "penwidth=3" in dot
+    rot = [x for x in a.downstream if x.edge_type == "ROTATION"]
+    assert rot and f"slack {rot[0].slack_min} · +{rot[0].propagated_delay_min}" in dot
+    for c in (x for x in a.downstream if x.edge_type == "CONNECTION"):
+        assert f"{c.pax_at_risk} pax" in dot and "style=dashed" in dot
+    assert dot == impact_dot(a, node, d.graph, "DL201")  # deterministic
+    assert fill_for(0) != fill_for(45) and fill_for(61) == fill_for(500)
+    assert "not in graph" in impact_dot(a, None, None)
+
+
+def test_ledger_rows_and_window_signoff(fixture_store) -> None:
+    run = ws.start(ws.prepare(fixture_store, ws.SOURCE_FIXTURE, "Rule", Stress(),
+                              scan=(ws.FIXTURE_AIRPORT, ws.FIXTURE_DATE, ws.DEFAULT_WINDOW)))
+    rows = ws.ledger_rows(run)
+    assert rows and {r["status"] for r in rows} == {"HELD"}
+    held = rows[0]["event_id"]
+    assert ws.sign_off(run, held, approve=False, who="") is not None  # who is required
+    assert ws.sign_off(run, held, approve=False, who="duty manager") is None
+    assert {r["status"] for r in ws.ledger_rows(run) if r["event_id"] == held} == {"RELEASED"}
+    assert run.dispatcher.status[held] == "REJECTED"
+    assert ws.sign_off(run, held, approve=True, who="duty manager") is not None  # already decided
+    assert ws.chain_ok(ws.orchestrator_entries(run))
+
+
+def test_window_scenario_f_preempts(fixture_store) -> None:
+    run = ws.start(ws.prepare(fixture_store, ws.SOURCE_FIXTURE, "Rule", Stress(), preempt_lowest=True,
+                              scan=(ws.FIXTURE_AIRPORT, ws.FIXTURE_DATE, ws.DEFAULT_WINDOW)))
+    assert run.error is None
+    assert any(e.type == "PREEMPT" for e in run.entries)
+    assert ws.queue(run).items[0].tier == 0
+
+
+def test_window_payload_list_and_empty_scan(fixture_store) -> None:
+    items, _ = ws.parse_payloads(ws.example_payloads(ws.SOURCE_FIXTURE))
+    run = ws.start(ws.prepare(fixture_store, ws.SOURCE_FIXTURE, "Rule", Stress(), payloads=items[:2]))
+    assert {it.flight_no for it in ws.queue(run).items} == {"DL201", "DL202"}
+    with pytest.raises(ws.WindowInputError):
+        ws.prepare(fixture_store, ws.SOURCE_FIXTURE, "Rule", Stress(), scan=("LAX", ws.FIXTURE_DATE, 30))
+
+
+def _window_app() -> AppTest:
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT_S).run()
+    at.radio(key="view_mode").set_value("Airport window").run()
+    assert not at.exception
+    return at
+
+
+def test_app_window_mode_loads_and_runs_fixture_queue() -> None:
+    at = _window_app()
+    assert "synthetic" in _all_markdown(at)
+    at.button(key="win_run").click().run()
+    assert not at.exception
+    text = _all_markdown(at)
+    for code in FIXTURE_CODES:
+        assert code in text
+    assert "SAFETY" in text or "NORMAL" in text
+    assert "mvts/h" in text and "×" in text  # each trigger's airport capacity and storm factor
+    assert "Orchestrator" in text and "DISPATCH" in text
+    assert at.get("graphviz_chart")
+    assert any("Booking ledger" in e.label for e in at.expander)
+
+
+def test_app_window_open_row_and_dispatch_link() -> None:
+    at = _window_app()
+    at.button(key="win_run").click().run()
+    row = next(b for b in at.button if b.key and b.key.startswith("wq-"))
+    row.click().run()
+    assert not at.exception
+    text = _all_markdown(at)
+    assert "AWAITING_SIGNOFF" in text or "CONSENSUS" in text or "FALLBACK" in text
+    opened = row.key.removeprefix("wq-")
+    assert at.selectbox(key="win_thread").value == opened  # the row opened that event's thread
+    at.selectbox(key="win_thread").set_value("orchestrator").run()
+    link = next(b for b in at.button if b.key and b.key.startswith("win-open-"))
+    link.click().run()
+    assert not at.exception
+    assert at.selectbox(key="win_thread").value != "orchestrator"  # DISPATCH links into the event thread

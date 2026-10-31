@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from acacia.agents.base import AgentPrivate, coerce_private
 from acacia.agents.declared import crew_duty_hhmm, decision_time_min, gate_notice_value, wake_value
-from acacia.constraints import GATE_CHANGE_NOTICE_MIN, burn_kg_per_h
+from acacia.constraints import GATE_CHANGE_NOTICE_MIN, GROUND_OVERTIME_RED_LINE_MIN, burn_kg_per_h
 from acacia.models import (
     AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, HardLimit,
     Option, PilotPrivate, ReasonCode, ResolutionPackage, SoftPref, Verdict,
@@ -22,7 +22,7 @@ from acacia.timeutil import to_hhmm, to_min
 
 PILOT_RED_LINE_PAX = 25
 CONNECTION_LOSS_MIN = 30  # connections utility hits 0 at connect_by + 30
-GROUND_RED_LINE_OVERTIME = 20
+GROUND_RED_LINE_OVERTIME = GROUND_OVERTIME_RED_LINE_MIN  # CREW-3, single source in constraints
 TRAFFIC_BEFORE_MIN = 30   # declared traffic window around the free slots
 TRAFFIC_AFTER_MIN = 60
 

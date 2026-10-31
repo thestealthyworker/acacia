@@ -189,3 +189,19 @@ def test_random_hold_sequences_never_double_book(ops: list[tuple]) -> None:
             _no_double_booking(ledger)
         # the JSONL replay reproduces the same state
         assert Ledger(DATE, runs_dir=Path(tmp)).all_reservations() == ledger.all_reservations()
+
+
+def test_runway_slot_stores_wake_class_and_replays_it(tmp_path: Path) -> None:
+    """WAKE-7: the slot carries the flight's class; the gate row carries none; replay keeps it."""
+    ledger = Ledger(DATE, runs_dir=tmp_path)
+    slot, gate = ledger.hold("EVT-1", "ATL", 730, "A5", 740, 775, wake_class="Heavy")
+    assert slot.wake_class == "Heavy" and gate.wake_class is None
+    view = Ledger(DATE, runs_dir=tmp_path).live()
+    assert view.slot_class("ATL", 730) == "Heavy"
+    assert view.slot_class("ATL", 730, exclude_event="EVT-1") is None
+    assert view.slot_class("ATL", 731) is None
+
+
+def test_slot_without_a_stored_class_reads_heavy(ledger: Ledger) -> None:
+    _hold(ledger, "EVT-1", 730)
+    assert ledger.live().slot_class("ATL", 730) == "Heavy"

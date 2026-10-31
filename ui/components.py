@@ -12,7 +12,7 @@ from acacia import config, constraints
 from acacia.models import DisruptionEvent
 from acacia.timeutil import to_hhmm, to_min
 from ui.theme import STAGES, chip, colour, esc, heading, scenario_chip, sim_chip
-from ui.view import View, hard, options, soft
+from ui.view import View, hard
 
 CAUSES = (("weather", "Weather", "var(--accent)"), ("late_aircraft", "Late aircraft", "var(--ground)"),
           ("air_system", "Air system", "var(--pilot)"), ("airline", "Airline", "var(--solver)"),

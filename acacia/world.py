@@ -9,7 +9,7 @@ airport's max runway movements per hour, x0.6 / x0.4 inside a moderate / severe 
 Wake separation (CONSTRAINTS.md 2): a point is separated for an aircraft of `own_class` when it
 is at least `constraints.wake_minutes` behind the nearest earlier movement and ahead of the
 nearest later one. Movements are background traffic (their seeded class) and other events'
-HELD/COMMITTED runway slots read through the ledger view (class Large, WAKE-7). The rule is
+HELD/COMMITTED runway slots read through the ledger view (their stored class, WAKE-7). The rule is
 applied across the merged arrival stream (WAKE-4). `free_slots_after` returns only such points.
 
 One `AirportWorld` per (airport, date, injected set): a runway grid with background traffic, a
@@ -35,7 +35,7 @@ Interval = tuple[int, int]
 
 TRAFFIC_PROBABILITY = constraints.BACKGROUND_LOAD  # CAP-7
 DEFAULT_STORM = "moderate"  # CAP-8: a RUNWAY_CLOSED window without a severity
-OTHER_EVENT_CLASS = "Large"  # WAKE-7: the ledger stores no aircraft class
+OTHER_EVENT_CLASS = "Large"  # default own class and fallback traffic class; held slots: held_slot_class
 WAKE_CLASSES = ("Super", "Heavy", "Large", "Small")
 GATE_COUNT = constraints.WORLD_GATE_POOL  # CAP-4
 GATE_NUMBER_RANGE = (1, 30)
@@ -80,6 +80,16 @@ def _slot_taken(view: LedgerView, airport: str, t: int, exclude_event: str | Non
     if exclude_event is None:
         return view.slot_taken(airport, t)
     return view.slot_taken(airport, t, exclude_event=exclude_event)
+
+
+def held_slot_class(view: LedgerView, airport: str, t: int, exclude_event: str | None = None) -> str | None:
+    """Wake class of another event's held/committed slot at t (WAKE-7); None when t is free.
+    A view without `slot_class`, or a slot with no stored class, reads as Heavy (most restrictive)."""
+    if not _slot_taken(view, airport, t, exclude_event):
+        return None
+    reader = getattr(view, "slot_class", None)
+    cls = reader(airport, t, exclude_event=exclude_event) if callable(reader) else None
+    return cls or constraints.UNKNOWN_SLOT_WAKE_CLASS
 
 
 def _gate_letter(airport: str) -> str:
@@ -191,11 +201,9 @@ class AirportWorld:
         reach = separation_reach()
         out: dict[int, str] = {}
         for p in range(max(0, t - reach), min(config.MINUTES_PER_DAY, t + reach + 1)):
-            cls = self.traffic_class(p)
+            cls = self.traffic_class(p) or held_slot_class(view, self.airport, p, exclude_event)
             if cls is not None:
                 out[p] = cls
-            elif _slot_taken(view, self.airport, p, exclude_event):
-                out[p] = OTHER_EVENT_CLASS
         return out
 
     def is_separated(

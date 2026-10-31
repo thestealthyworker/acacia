@@ -75,8 +75,9 @@ def _header(state: RunState, visible: Sequence[LogEntry]) -> str:
             f'{len(visible)} of {len(state.entries)} entries{"" if state.done else " · running"}</div>')
 
 
-def _entry(e: LogEntry) -> None:
-    with st.container(key=f"msg-{e.who}-{e.seq}"):
+def render_entry(e: LogEntry, key_prefix: str = "") -> None:
+    """One chat message; `key_prefix` keeps keys unique when several hash chains share a panel."""
+    with st.container(key=f"msg-{e.who}-{key_prefix}{e.seq}"):
         with st.chat_message(e.who, avatar=sender_avatar(e.who)):
             bits = [f'<b style="color:{colour(e.who)}">{esc(sender_label(e.who))}</b>', chip(e.type, "muted")]
             if e.state:
@@ -112,7 +113,7 @@ def channel(state: RunState | None) -> None:
     with st.container(height=CHANNEL_HEIGHT, border=False):
         for e in visible:
             if e.who in keep:
-                _entry(e)
+                render_entry(e)
         if state.running and state.idx >= len(state.entries):
             who = next_speaker(state.entries) or "Agents"
             st.markdown(f'<div class="composing">{esc(who)} is composing…</div>', unsafe_allow_html=True)

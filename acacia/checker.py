@@ -21,7 +21,7 @@ from acacia.models import (
     RuleResult,
 )
 from acacia.timeutil import is_hhmm, to_hhmm, to_min
-from acacia.world import OTHER_EVENT_CLASS, AirportWorld, separation_reach
+from acacia.world import OTHER_EVENT_CLASS, AirportWorld, held_slot_class, separation_reach
 
 CHECKER_VERSION = "checker-0.4"
 REMOTE_PREFIX = "REMOTE"
@@ -29,6 +29,13 @@ REMOTE_PREFIX = "REMOTE"
 
 def is_remote(gate: str) -> bool:
     return gate.upper().startswith(REMOTE_PREFIX)
+
+
+def is_known_remote(gate: str) -> bool:
+    """Exactly REMOTE-k with 1 <= k <= constraints.REMOTE_STANDS (GATE-2)."""
+    prefix, _, num = gate.partition("-")
+    return prefix == REMOTE_PREFIX and num.isdigit() and str(int(num)) == num \
+        and 1 <= int(num) <= constraints.REMOTE_STANDS
 
 
 def _result(rule: ReasonCode, passed: bool, detail: str) -> RuleResult:
@@ -123,6 +130,9 @@ def _gate_blockers(world: AirportWorld, gate: str, start: int, end: int) -> list
 def check_gate(slot: int, gate: str, event: DisruptionEvent, private: PrivateState,
                world: AirportWorld) -> RuleResult:
     if is_remote(gate):
+        if not is_known_remote(gate):
+            return _result(ReasonCode.GATE_CONFLICT, False,
+                           f"{gate} is not a remote stand (REMOTE-1..{constraints.REMOTE_STANDS}).")
         return _result(ReasonCode.GATE_CONFLICT, True, f"{gate} is a remote stand (always passes).")
     if gate not in world.gates():
         return _result(ReasonCode.GATE_CONFLICT, False, f"{gate} is not a gate at {world.airport}.")
@@ -165,8 +175,9 @@ def check_resources(slot: int, gate: str, event: DisruptionEvent, private: Priva
     """Live ledger: no other event's runway slot inside the wake minimum, no gate overlap."""
     me = event.event_id
     reach = wake_reach()
-    held = {t: OTHER_EVENT_CLASS for t in range(slot - reach, slot + reach + 1)
-            if ledger_live.slot_taken(airport, t, exclude_event=me)}
+    classes = {t: held_slot_class(ledger_live, airport, t, exclude_event=me)
+               for t in range(slot - reach, slot + reach + 1)}
+    held = {t: cls for t, cls in classes.items() if cls is not None}
     violation = _wake_violation(slot, private.atc.own_class, held)
     if violation:
         return _result(ReasonCode.RESOURCE_CONFLICT, False,

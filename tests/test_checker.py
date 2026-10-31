@@ -241,17 +241,29 @@ def test_checker_reads_live_ledger_not_a_snapshot(event, ledger) -> None:
 
 
 def test_held_slot_inside_wake_minimum_fails(event, ledger) -> None:
-    ledger.hold("OTHER", "ATL", 741, "A10", 751, 786)  # 1 min < 1.29 min (Large/Large)
+    ledger.hold("OTHER", "ATL", 741, "A10", 751, 786, wake_class="Large")  # 1 min < 1.29 min (Large/Large)
     rule = _rule(_run(event, _private(), 740, ledger=ledger.live()), ReasonCode.RESOURCE_CONFLICT)
     assert not rule.passed and "runway slot" in rule.detail
 
 
 def test_held_slot_beyond_wake_minimum_passes(event, ledger) -> None:
-    ledger.hold("OTHER", "ATL", 742, "A10", 752, 787)  # 2 min >= 1.29 min
+    ledger.hold("OTHER", "ATL", 742, "A10", 752, 787, wake_class="Large")  # 2 min >= 1.29 min
     live = ledger.live()
     assert _rule(_run(event, _private(), 740, ledger=live), ReasonCode.RESOURCE_CONFLICT).passed
     heavy = _run(event, _private(own="Heavy"), 740, ledger=live)  # Heavy -> Large needs 2.14
     assert not _rule(heavy, ReasonCode.RESOURCE_CONFLICT).passed
+
+
+def test_held_heavy_slot_ahead_of_a_large_fails(event, ledger) -> None:
+    """Review fix (WAKE-7): the checker reads the held slot's class, not a blanket Large."""
+    ledger.hold("OTHER", "ATL", 738, "A10", 748, 783, wake_class="Heavy")  # 2 min < 2.14 (Heavy -> Large)
+    rule = _rule(_run(event, _private(), 740, ledger=ledger.live()), ReasonCode.RESOURCE_CONFLICT)
+    assert not rule.passed and "Heavy" in rule.detail
+
+
+def test_held_slot_without_a_class_is_checked_as_heavy(event, ledger) -> None:
+    ledger.hold("OTHER", "ATL", 738, "A10", 748, 783)  # no stored class -> Heavy (most restrictive)
+    assert not _rule(_run(event, _private(), 740, ledger=ledger.live()), ReasonCode.RESOURCE_CONFLICT).passed
 
 
 def test_double_booking_package_fails_with_real_world(event, ledger) -> None:
@@ -362,3 +374,14 @@ def test_gate_turnaround_interval_uses_private_min_turn(event) -> None:
     busy = FakeWorld(busy={"A7": [(784, 800)]})  # turnaround [750, 750 + min_turn)
     assert _rule(_run(event, _private(min_turn=34), 740, world=busy), ReasonCode.GATE_CONFLICT).passed
     assert not _rule(_run(event, _private(min_turn=35), 740, world=busy), ReasonCode.GATE_CONFLICT).passed
+
+
+def test_unknown_remote_stand_names_fail_gate_rule(event) -> None:
+    """GATE-2: only REMOTE-1..REMOTE_STANDS exist; any other remote name fails GATE_CONFLICT."""
+    from acacia import constraints
+
+    last = f"REMOTE-{constraints.REMOTE_STANDS}"
+    assert _rule(_run(event, _private(), 740, gate=last), ReasonCode.GATE_CONFLICT).passed
+    for bad in ("REMOTE-42", "REMOTE-0", "REMOTE", "remote-1", "REMOTE-01", "REMOTE-x"):
+        rule = _rule(_run(event, _private(), 740, gate=bad), ReasonCode.GATE_CONFLICT)
+        assert not rule.passed and "not a remote stand" in rule.detail, bad

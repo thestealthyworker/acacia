@@ -260,3 +260,42 @@ def test_preempt_unknown_event_raises(store: DataStore, tmp_path: Path) -> None:
     d = _dispatcher(store, tmp_path)
     with pytest.raises(KeyError):
         d.preempt("EVT-NOPE", Stress(low_fuel=True))
+
+
+# --- review fixes (validator FINAL) ------------------------------------------------------------
+def test_held_runway_slots_carry_the_flights_wake_class(scenario_e) -> None:
+    """WAKE-7: the dispatcher stores constraints.wake_class(distance) on each held runway slot."""
+    from acacia import constraints
+
+    d, _ = scenario_e
+    slots = [r for r in d.ledger.all_reservations() if r.resource_type == "RUNWAY_SLOT"]
+    assert slots
+    for r in slots:
+        assert r.wake_class == constraints.wake_class(d.events[r.event_id].distance)
+
+
+def test_hold_on_a_ledger_that_already_holds_the_event_marks_manual(store: DataStore, tmp_path: Path) -> None:
+    from acacia.ledger import LedgerStateError
+
+    d = _dispatcher(store, tmp_path)
+    d.collect(payloads=[{"flight": "DL201", "date": DATE}])
+
+    def already(*_a, **_k):
+        raise LedgerStateError("EVT already holds reservations; release first")
+
+    d.ledger.hold = already  # type: ignore[method-assign]
+    entries = _run(d)
+    eid = next(iter(d.events))
+    assert d.outcomes[eid] == "MANUAL" and d.status[eid] == "REJECTED"
+    assert any(e.type == "LEDGER" and "LedgerStateError" in e.text for e in entries)
+
+
+def test_record_without_a_checker_pass_is_not_held(store: DataStore, tmp_path: Path) -> None:
+    """Fail closed: a non-divert plan with checker_pass None is marked manual, never held."""
+    d = _dispatcher(store, tmp_path)
+    d.collect(payloads=[{"flight": "DL201", "date": DATE}])
+    eid = next(iter(d.events))
+    record = ConsensusRecord(event_id=eid, outcome="CONSENSUS", package={"slot": "12:10", "gate": "A5"},
+                             turns_used=2, decisions=[], checker_pass=None)
+    list(d._book(eid, record))
+    assert d.outcomes[eid] == "MANUAL" and not d.ledger.reservations_for(eid)

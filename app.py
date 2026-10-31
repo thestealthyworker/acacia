@@ -19,11 +19,10 @@ from acacia.models import DisruptionEvent, Stress
 from acacia.trigger import TriggerError, to_event
 from ui import runs
 from ui.channel import FULL_RERUN, SPEED_KEY, channel, request_full_rerun
-from ui.components import agent_cards, event_card, outcome_panel, protocol, solver_table
 from ui.constraints_panel import constraints_panel
+from ui.dashboard import event_panels
 from ui.theme import CSS
-from ui.timeline import timeline_chart, timeline_data
-from ui.view import build_view
+from ui.window import render_window
 
 logger = logging.getLogger(__name__)
 
@@ -169,19 +168,7 @@ def signoff_controls(state: runs.RunState) -> None:
 
 
 def dashboard(state: runs.RunState) -> None:
-    view = build_view(state.visible)
-    event_card(state.event)
-    protocol(view)
-    agent_cards(view, state.event)
-    solver_table(view, state.event)
-    with st.container(border=True):
-        st.markdown('<div class="ac-h">Timeline <span class="chip sim">simulated</span></div>', unsafe_allow_html=True)
-        data = timeline_data(view, state.event)
-        if data is None:
-            st.caption("Appears once ATC declares its slots.")
-        else:
-            st.altair_chart(timeline_chart(data), width="stretch")
-    outcome_panel(view)
+    event_panels(state.visible, state.event)
     signoff_controls(state)
 
 
@@ -207,12 +194,13 @@ def single_flight_body(events: dict[str, DisruptionEvent]) -> None:
 
 
 def render_window_mode() -> None:
-    """PLACEHOLDER: airport-window mode (HANDOVER 13 multi-trigger additions), built later by another agent.
+    """Airport window mode (HANDOVER 13 multi-trigger additions, FABLE_ADDENDUM 8): ui/window.py.
 
-    Expected: airport/date/window picker or trigger payload list, trigger queue with tier chips and
-    impact bars, impact graph (st.graphviz_chart), booking ledger, and the orchestrator thread.
+    Uses the header's agent mode and stress toggles; the synthetic fixture day when flights.csv
+    is absent. Playback is not timed here: the dispatcher drains the whole queue at once.
     """
-    st.info("Airport window mode is not built yet. Use Single flight.")
+    st.session_state.pop(FULL_RERUN, None)
+    render_window(st.session_state.get(MODE_KEY, "Rule"), current_stress())
 
 
 def main() -> None:

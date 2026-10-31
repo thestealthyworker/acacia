@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from acacia import config
+from acacia import config, constraints
 from acacia.models import LedgerView, Reservation
 from acacia.timeutil import to_hhmm, to_min
 
@@ -51,6 +51,13 @@ class _View:
 
     def slot_taken(self, airport: str, t: int, exclude_event: str | None = None) -> bool:
         return any(to_min(r.start) == t for r in self._active(airport, "RUNWAY_SLOT", exclude_event))
+
+    def slot_class(self, airport: str, t: int, exclude_event: str | None = None) -> str | None:
+        """Wake class of the active slot at t (Heavy when none was stored); None when t is free."""
+        for r in self._active(airport, "RUNWAY_SLOT", exclude_event):
+            if to_min(r.start) == t:
+                return r.wake_class or constraints.UNKNOWN_SLOT_WAKE_CLASS
+        return None
 
     def gate_busy(
         self, airport: str, gate: str, start: int, end: int, exclude_event: str | None = None
@@ -113,9 +120,11 @@ class Ledger:
 
     # --- writes -----------------------------------------------------------------------------
     def hold(
-        self, event_id: str, airport: str, slot: int, gate: str, gate_start: int, gate_end: int
+        self, event_id: str, airport: str, slot: int, gate: str, gate_start: int, gate_end: int,
+        wake_class: str | None = None,
     ) -> list[Reservation]:
-        """HELD runway slot at `slot` and gate [gate_start, gate_end). Raises on conflict."""
+        """HELD runway slot at `slot` (carrying the flight's `wake_class`, WAKE-7) and gate
+        [gate_start, gate_end). Raises on conflict."""
         self._validate_hold(event_id, airport, slot, gate, gate_start, gate_end)
         if any(_is_active(r) for r in self._rows if r.event_id == event_id):
             raise LedgerStateError(f"{event_id} already holds reservations; release first")
@@ -128,17 +137,21 @@ class Ledger:
             )
         end_wire = min(gate_end, config.DAY_END)  # HH:MM cannot express 24:00
         created = [
-            self._add(event_id, "RUNWAY_SLOT", airport, "RWY", slot, slot),
+            self._add(event_id, "RUNWAY_SLOT", airport, "RWY", slot, slot, wake_class),
             self._add(event_id, "GATE", airport, gate, gate_start, end_wire),
         ]
         return [r.model_copy() for r in created]
 
-    def _add(self, event_id: str, kind: str, airport: str, rid: str, start: int, end: int) -> Reservation:
+    def _add(
+        self, event_id: str, kind: str, airport: str, rid: str, start: int, end: int,
+        wake_class: str | None = None,
+    ) -> Reservation:
         """Create a HELD reservation with the next sequence number, store and persist it."""
         seq = len(self._rows) + 1
         res = Reservation(
             res_id=f"R-{event_id}-{kind}-{seq}", resource_type=kind, airport=airport,
             resource_id=rid, start=to_hhmm(start), end=to_hhmm(end), event_id=event_id, status="HELD",
+            wake_class=wake_class,
         )
         self._rows.append(res)
         self._append("hold", res)

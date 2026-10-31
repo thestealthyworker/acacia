@@ -278,7 +278,7 @@ class Dispatcher:
             self._emit("LEDGER", f"{event.flight.code}: FALLBACK divert to {pkg.get('alternate')}; nothing to "
                        "book at the destination. Awaiting sign-off.", event_id=eid,
                        payload={"op": "none", "outcome": record.outcome, "divert": True})
-        elif pkg.get("slot") is None or pkg.get("gate") is None or record.checker_pass is False:
+        elif pkg.get("slot") is None or pkg.get("gate") is None or record.checker_pass is not True:
             self._mark_manual(eid, f"plan has no bookable slot/gate or the checker failed it ({pkg.get('package_id')})")
         else:
             yield from self._hold(eid, record)
@@ -290,7 +290,11 @@ class Dispatcher:
         start = slot + event.taxi_in
         end = min(start + constraints.min_turnaround(event.flight.dest), 1440)
         try:
-            held = self.ledger.hold(eid, event.flight.dest.upper(), slot, gate, start, end)
+            held = self.ledger.hold(eid, event.flight.dest.upper(), slot, gate, start, end,
+                                    wake_class=constraints.wake_class(event.distance))
+        except LedgerStateError as exc:  # the event already holds (a replayed --keep-ledger ledger)
+            self._mark_manual(eid, f"hold refused, LedgerStateError: {exc}")
+            return
         except DoubleBookingError as exc:
             self._release_quietly(eid)
             self._emit("LEDGER", f"{event.flight.code}: hold refused, DoubleBookingError: {exc}. The world changed "

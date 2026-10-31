@@ -24,7 +24,7 @@ from acacia.models import (
     AtcPrivate, DisruptionEvent, GroundPrivate, LedgerView, PilotPrivate, PrivateState, Stress,
 )
 from acacia.timeutil import to_min
-from acacia.world import OTHER_EVENT_CLASS, AirportWorld, separation_reach
+from acacia.world import OTHER_EVENT_CLASS, AirportWorld, held_slot_class, separation_reach
 
 QUEUE_WEATHER_FACTOR = 0.6
 QUEUE_RANGE = (3, 8)
@@ -69,12 +69,14 @@ def _closure_near(world: AirportWorld, eta: int, first: int) -> bool:
 
 # --- runway: traffic and wake separation (CONSTRAINTS.md 2) -----------------------------------
 def _neighbours(world: AirportWorld, view: LedgerView, start: int, end: int) -> dict[int, str]:
-    """Traffic (seeded wake class) and other events' held slots (Large, WAKE-7) in [start, end)."""
+    """Traffic (seeded wake class) and other events' held slots (stored class, WAKE-7) in [start, end)."""
     start, end = max(0, start), min(config.MINUTES_PER_DAY, end)
     out = {t: world.traffic_class(t) or OTHER_EVENT_CLASS for t in world.traffic_times(start, end)}
     for p in world.grid():
-        if start <= p < end and p not in out and view.slot_taken(world.airport, p):
-            out[p] = OTHER_EVENT_CLASS
+        if start <= p < end and p not in out:
+            cls = held_slot_class(view, world.airport, p)
+            if cls is not None:
+                out[p] = cls
     return out
 
 

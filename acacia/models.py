@@ -239,6 +239,7 @@ class Reservation(BaseModel):
     end: HHMM  # slot: start == end
     event_id: str
     status: Literal["HELD", "COMMITTED", "RELEASED"]
+    wake_class: str | None = None  # ADDED: RUNWAY_SLOT only, CONSTRAINTS.md 2 class of the booked flight (WAKE-7)
 
 
 # --- outcome --------------------------------------------------------------------------------
@@ -326,6 +327,10 @@ class LogEntry(BaseModel):
 class LedgerView(Protocol):
     def slot_taken(self, airport: str, t: int, exclude_event: str | None = None) -> bool: ...
 
+    def slot_class(self, airport: str, t: int, exclude_event: str | None = None) -> str | None:
+        """ADDED (WAKE-7): wake class of the active slot at t; None when t is free."""
+        ...
+
     def gate_busy(
         self, airport: str, gate: str, start: int, end: int, exclude_event: str | None = None
     ) -> bool: ...
@@ -336,6 +341,9 @@ class EmptyLedgerView:
 
     def slot_taken(self, airport: str, t: int, exclude_event: str | None = None) -> bool:
         return False
+
+    def slot_class(self, airport: str, t: int, exclude_event: str | None = None) -> str | None:
+        return None
 
     def gate_busy(
         self, airport: str, gate: str, start: int, end: int, exclude_event: str | None = None

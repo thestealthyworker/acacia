@@ -172,14 +172,19 @@ def test_free_slots_after_end_of_day_is_empty() -> None:
 
 # --- wake separation (CONSTRAINTS.md 2, WAKE-1..4, WAKE-7) ---------------------------------
 class _HeldView(EmptyLedgerView):
-    """A view with held runway slots per event id, honouring exclude_event."""
+    """A view with held runway slots per event id, honouring exclude_event; every held slot
+    carries wake class `cls` (None: no stored class)."""
 
-    def __init__(self, held: dict[int, str]) -> None:
+    def __init__(self, held: dict[int, str], cls: str | None = "Large") -> None:
         self.held = held
+        self.cls = cls
 
     def slot_taken(self, airport: str, t: int, exclude_event: str | None = None) -> bool:
         owner = self.held.get(t)
         return owner is not None and owner != exclude_event
+
+    def slot_class(self, airport: str, t: int, exclude_event: str | None = None) -> str | None:
+        return self.cls if self.slot_taken(airport, t, exclude_event) else None
 
 
 def _isolated_point(world: AirportWorld, lo: int = 300) -> int:
@@ -204,7 +209,7 @@ def test_is_separated_uses_workbook_minutes_against_held_slots() -> None:
     t = _isolated_point(world)
     ok, detail = world.is_separated(t, "Large", EmptyLedgerView())
     assert ok and "separated" in detail
-    # another event's held slot counts as Large (WAKE-7): Large -> Large needs 3 nm = 1.29 min
+    # another event's held Large slot (WAKE-7): Large -> Large needs 3 nm = 1.29 min
     assert not world.is_separated(t, "Large", _HeldView({t - 1: "EV-2"}))[0]
     assert world.is_separated(t, "Large", _HeldView({t - 2: "EV-2"}))[0]
     assert not world.is_separated(t, "Large", _HeldView({t + 1: "EV-2"}))[0]
@@ -349,3 +354,34 @@ def test_injected_times_round_trip() -> None:
     world = AirportWorld("ATL", DATE, [CLOSURE])
     (start, end), = world.closures()
     assert to_hhmm(start) == CLOSURE.start and to_hhmm(end) == CLOSURE.end
+
+
+def test_held_heavy_slot_uses_its_stored_class() -> None:
+    """Review fix (WAKE-7): a Large 2 min behind a held Heavy fails (Heavy -> Large 5 nm = 2.14 min)."""
+    world = AirportWorld("SFO", DATE, [])
+    t = _isolated_point(world)
+    assert world.is_separated(t, "Large", _HeldView({t - 2: "EV-2"}, cls="Large"))[0]
+    ok, detail = world.is_separated(t, "Large", _HeldView({t - 2: "EV-2"}, cls="Heavy"))
+    assert not ok and "Heavy" in detail
+    assert world.is_separated(t, "Large", _HeldView({t - 3: "EV-2"}, cls="Heavy"))[0]
+
+
+def test_held_slot_without_a_class_reads_as_heavy() -> None:
+    world = AirportWorld("SFO", DATE, [])
+    t = _isolated_point(world)
+    assert not world.is_separated(t, "Large", _HeldView({t - 2: "EV-2"}, cls=None))[0]
+    assert not world.is_separated(t, "Large", _SlotOnlyView({t - 2: "EV-2"}))[0]
+
+
+class _SlotOnlyView:
+    """A legacy view with slot_taken only (no slot_class)."""
+
+    def __init__(self, held: dict[int, str]) -> None:
+        self.held = held
+
+    def slot_taken(self, airport: str, t: int, exclude_event: str | None = None) -> bool:
+        owner = self.held.get(t)
+        return owner is not None and owner != exclude_event
+
+    def gate_busy(self, airport: str, gate: str, start: int, end: int, exclude_event: str | None = None) -> bool:
+        return False

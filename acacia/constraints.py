@@ -28,6 +28,8 @@ STORM_FACTOR = {"none": 1.0, "moderate": 0.6, "severe": 0.4}  # CAP-3
 SEVERE_WEATHER_DELAY_MIN = 45            # CAP-3: severe if WEATHER_DELAY > 45
 APPROACH_SPEED_KT = 140.0                # WAKE-2
 HEAVY_DISTANCE_MI = 2000                 # WAKE-3
+REMOTE_STANDS = 9                        # GATE-2: REMOTE-1..REMOTE_STANDS
+UNKNOWN_SLOT_WAKE_CLASS = "Heavy"        # WAKE-7: a held slot with no stored class (most restrictive)
 TRAFFIC_CLASS_MIX = (("Heavy", 0.15), ("Large", 0.80), ("Small", 0.05))  # WAKE-3
 BACKGROUND_LOAD = 0.55                   # CAP-7
 WORLD_GATE_POOL = 8                      # CAP-4
@@ -242,13 +244,15 @@ REGISTRY: tuple[ConstraintItem, ...] = (
                    "REMOTE-1..9, each one bookable stand; a remote stand counts as a gate change",
                    "ASSUMED"),
     ConstraintItem("WAKE-7", "wake_separation", "Wake class of other negotiated flights", "not stated",
-                   "Large (the ledger stores no aircraft class)", "ASSUMED"),
+                   "the class stored on the held runway slot (wake_class(distance)); Heavy when none is stored",
+                   "ASSUMED", "unknown class read as Heavy, the most restrictive class produced"),
     ConstraintItem("CAP-8", "airport_capacity", "Storm severity when not given", "not stated",
                    "moderate (x0.6) unless the injected event says severe", "ASSUMED"),
     ConstraintItem("FUEL-5", "fuel_and_crew", "Fuel utility span", "not stated",
                    "(land_by - slot) / (land_by - E); 45 min when E is not declared", "ASSUMED"),
     ConstraintItem("PLAY-1", "rules_of_play", "Qualifying input", "WEATHER_DELAY > 15 or LATE_AIRCRAFT_DELAY > 20",
-                   "as given, plus earliest landing 01:00-21:30", "CHANGED", "no midnight crossing in the MVP"),
+                   "as given, plus earliest landing 01:00-21:30; an explicit injected event waives the "
+                   "delay-cause test", "CHANGED", "no midnight crossing in the MVP; injected events force a trigger"),
     ConstraintItem("PLAY-2", "rules_of_play", "Turn and 3-turn limit", "3 turns", "turn 1 declare, turns 2-3 vote", "AS_GIVEN"),
     ConstraintItem("PLAY-3", "rules_of_play", "Fallback logs why", "required", "reason in FallbackPlan and log", "AS_GIVEN"),
     ConstraintItem("KIT-1", "kit", "Private agent state", "not given",
@@ -257,9 +261,13 @@ REGISTRY: tuple[ConstraintItem, ...] = (
     ConstraintItem("FUEL-6", "fuel_and_crew", "Holding fuel on a divert", "not stated",
                    "not modelled: the aircraft diverts at once, holding_fuel_kg shown as none", "ASSUMED"),
     ConstraintItem("KIT-3", "kit", "Fallback gate choice", "kit: earliest free gate",
-                   "assigned gate first, then earliest free gate, then a remote stand", "CHANGED",
+                   "assigned gate first, then earliest free gate, then a remote stand; if no gate meets "
+                   "the 20 min notice at the earliest slot, the next free slot <= land_by is used", "CHANGED",
                    "keeping the assigned gate needs no 20 min gate-change notice"),
     ConstraintItem("KIT-4", "kit", "Ground timeout default", "kit: every gate unavailable except REMOTE-1",
                    "as kit; REMOTE-1 counts as a gate change needing 20 min notice; workbook turnaround",
                    "ASSUMED", "most restrictive reading"),
+    ConstraintItem("KIT-5", "kit", "ATC arrival queue before the first slot", "not stated",
+                   "round(0.6 x WEATHER_DELAY) min when WEATHER_DELAY > 15, else seeded 3-8 min",
+                   "ASSUMED", "long weather delays push the first slot past land_by, so they divert"),
 )

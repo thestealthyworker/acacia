@@ -119,6 +119,13 @@ table.pk tr.sent td{background:var(--accent-soft)} table.pk tr.disc td{color:var
 [class*="st-key-strip-"] button > div{justify-content:flex-start;width:100%}
 [class*="st-key-strip-"] button p{text-align:left;font-family:var(--mono);font-size:12.5px;white-space:pre}
 [class*="st-key-strip-sel"] button{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+[class*="st-key-msg-orchestrator"] [data-testid="stChatMessage"]{border-left:3px solid var(--orch);background:var(--panel2)}
+.qrow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px}
+.qrank{font-family:var(--display);font-weight:700;font-size:20px;min-width:22px;color:var(--muted)}
+.qbar{width:140px;display:inline-flex;vertical-align:middle}
+.qcap{font-size:11.5px;margin:2px 0 0 28px}
+[class*="st-key-qrow-"]{border-left:6px solid var(--strip);padding-left:6px;border-radius:4px}
+[class*="st-key-qrow-sel"]{border-left-color:var(--accent);background:var(--accent-soft)}
 [data-testid="stMainBlockContainer"]{padding-top:1.6rem}
 [data-testid="stBaseButton-primary"]{background:var(--accent)!important;border-color:var(--accent)!important;color:var(--panel)!important}
 [data-testid="stBaseButton-primary"]:hover{filter:brightness(1.1)}
