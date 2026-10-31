@@ -99,7 +99,7 @@ No other module reads the CSVs or hard-codes these numbers.
 
 ## 7. What does not change
 
-Contracts other than the ADDED fields above; the state machine; turn limits; checker independence (no solver import); MCT 35 min for connections (kit value; the workbook has none, so ASSUMED); impact policy `impact-0.1`; scoring policy weights `policy-0.1`.
+Contracts other than the ADDED fields above; the state machine; turn limits; checker independence (no solver import); MCT 35 min for connections (kit value; the workbook has none, so ASSUMED); impact policy `impact-0.1`; scoring policy weights `policy-0.2` (owner-approved change from `policy-0.1`, not a workbook item; see DECISIONS.md).
 
 ---
 

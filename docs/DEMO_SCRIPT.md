@@ -85,6 +85,8 @@ Set **Agents** to **LLM** and re-run DL1639.
   The delays are real 2015 US DOT data. Agents' private data (slots, passengers, crew shifts) is simulated, seeded and labelled.
 - **"How does it scale?"**
   Impact graph, a safety tier, deadline-ordered dispatch with a shared clock, and a ledger that rejects double booking.
+- **"Weak spots?"** *(say it before they find it)*
+  On the multi-flight test day, the plans total 165 min of knock-on delay against 140 min if nothing is done. Even the earliest safe slot for every flight totals 152 min, because our simulated storm capacity is harsher than the real day. Policy 0.2 already cut it from 242 min by rewarding earlier landings.
 - **"What would you build next?"**
   Real crew rosters, live data feeds, optimising a whole hub at once, and signing every message.
 
