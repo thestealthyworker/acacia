@@ -1,0 +1,144 @@
+"""Deterministic rule-based fallback plan (HANDOVER 10). No AI involved.
+
+1. Slot: the earliest ATC free slot (first-come-first-served).
+2. If there is none, or it is past land_by: DIVERT to the nearest airport by haversine
+   distance from the destination, excluding the destination, the origin and airports with
+   blank coordinates.
+3. Otherwise gate: the non-failed gate with the earliest free time that is free by the gate
+   arrival time, else a remote stand. When the world is given, a gate must be clear for the
+   full turnaround [gate arrival, gate arrival + min_turn) (PLAN 2.A.1). When a ledger view is
+   given, the remote stand is the first REMOTE-k (k = 1..REMOTE_STANDS) not booked for that
+   interval, so two fallback plans never share one stand.
+
+The coordinator runs the checker on a non-divert plan; this module never imports it.
+"""
+
+from __future__ import annotations
+
+import math
+
+from typing import TYPE_CHECKING
+
+import pandas as pd
+
+from acacia.models import DisruptionEvent, EmptyLedgerView, FallbackPlan, LedgerView, PrivateState
+from acacia.timeutil import to_hhmm
+
+if TYPE_CHECKING:
+    from acacia.world import AirportWorld
+
+EARTH_RADIUS_MI = 3958.8
+REMOTE_STAND = "REMOTE-1"
+REMOTE_STANDS = 9
+
+
+def haversine_mi(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in statute miles."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * EARTH_RADIUS_MI * math.asin(math.sqrt(a))
+
+
+def _coord(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(number) else number
+
+
+def _coords(airports: pd.DataFrame) -> dict[str, tuple[float, float]]:
+    out: dict[str, tuple[float, float]] = {}
+    for code, lat, lon in zip(airports["IATA_CODE"], airports["LATITUDE"], airports["LONGITUDE"]):
+        la, lo = _coord(lat), _coord(lon)
+        if isinstance(code, str) and code.strip() and la is not None and lo is not None:
+            out[code.strip().upper()] = (la, lo)
+    return out
+
+
+def nearest_alternate(airports: pd.DataFrame, dest: str, origin: str) -> tuple[str | None, float | None]:
+    """(IATA code, distance in miles) of the nearest airport to `dest`, or (None, None)."""
+    required = {"IATA_CODE", "LATITUDE", "LONGITUDE"}
+    if not required.issubset(airports.columns):
+        raise ValueError(f"airports table needs columns {sorted(required)}")
+    coords = _coords(airports)
+    home = coords.get(dest.upper())
+    if home is None:
+        return None, None
+    excluded = {dest.upper(), origin.upper()}
+    best = min(
+        ((haversine_mi(*home, *xy), code) for code, xy in coords.items() if code not in excluded),
+        default=None,
+    )
+    if best is None:
+        return None, None
+    return best[1], round(best[0], 1)
+
+
+def _fits(world: AirportWorld | None, view: LedgerView, gate: str, start: int, min_turn: int) -> bool:
+    """True when the world says gate is clear for [start, start + min_turn); True without a world."""
+    if world is None:
+        return True
+    try:
+        return world.gate_free_from(gate, start, view, duration=min_turn) == start
+    except KeyError:
+        return False
+
+
+def _pick_gate(event: DisruptionEvent, private: PrivateState, gate_arr: int,
+               world: AirportWorld | None, view: LedgerView) -> str | None:
+    """The earliest-free usable gate clear for the turnaround, or None."""
+    g = private.ground
+    usable = sorted((g.free_from[x], i, x) for i, x in enumerate(g.gates)
+                    if x not in g.failed and g.free_from.get(x) is not None)
+    for free, _, gate in usable:
+        if free <= gate_arr and _fits(world, view, gate, gate_arr, g.min_turn):  # type: ignore[operator]
+            return gate
+    return None
+
+
+def _pick_remote(event: DisruptionEvent, gate_arr: int, min_turn: int, view: LedgerView | None) -> str:
+    """REMOTE-1, or with a ledger view the first remote stand not booked for the turnaround."""
+    if view is None:
+        return REMOTE_STAND
+    airport = event.flight.dest.upper()
+    for k in range(1, REMOTE_STANDS + 1):
+        stand = f"REMOTE-{k}"
+        if not view.gate_busy(airport, stand, gate_arr, gate_arr + min_turn, exclude_event=event.event_id):
+            return stand
+    return REMOTE_STAND
+
+
+def _divert(event: DisruptionEvent, airports: pd.DataFrame, why: str) -> FallbackPlan:
+    code, dist = nearest_alternate(airports, event.flight.dest, event.flight.origin)
+    where = f"nearest alternate {code} ({dist} mi)" if code else "no alternate with coordinates found"
+    return FallbackPlan(event_id=event.event_id, divert=True, alternate=code,
+                        alternate_distance_mi=dist, reason=f"{why} DIVERT: {where}.")
+
+
+def plan_fallback(event: DisruptionEvent, private: PrivateState, airports_df: pd.DataFrame,
+                  world: AirportWorld | None = None,
+                  ledger_view: LedgerView | None = None) -> FallbackPlan:
+    """The FCFS fallback plan for one event, from ground-truth private state.
+
+    Pass the airport `world` and the live `ledger_view` so the plan passes the checker's full
+    turnaround and remote-stand checks; without them the HANDOVER 10 start-time rule applies.
+    """
+    slots = sorted(private.atc.free_slots)
+    land_by = private.pilot.land_by
+    if not slots:
+        return _divert(event, airports_df, "No free runway slot.")
+    slot = slots[0]
+    if slot > land_by:
+        return _divert(event, airports_df,
+                       f"Earliest slot {to_hhmm(slot)} is past the fuel limit {to_hhmm(land_by)}.")
+    gate_arr = slot + event.taxi_in
+    view = ledger_view if ledger_view is not None else EmptyLedgerView()
+    gate = _pick_gate(event, private, gate_arr, world, view)
+    remote = gate is None
+    if remote:
+        gate = _pick_remote(event, gate_arr, private.ground.min_turn, ledger_view)
+    return FallbackPlan(event_id=event.event_id, slot=to_hhmm(slot), gate=gate,
+                        reason="First-come-first-served slot, earliest free gate"
+                               + (" (none free, remote stand)." if remote else "."))
