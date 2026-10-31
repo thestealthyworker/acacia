@@ -6,6 +6,7 @@ panel grouping, the timeline data and the sign-off path. All offline with rule a
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -345,3 +346,13 @@ def test_autoscroll_script_targets_anchor_and_token() -> None:
 def test_timeline_legend_labels_fit() -> None:
     assert "turnaround (under vote)" in COLOURS
     assert LEGEND_LABEL_LIMIT_PX >= 200
+
+
+def test_default_demo_shows_the_arrival_runway() -> None:
+    """CAP-9: the plan's runway is shown in the verdict banner, the outcome rows and the solver table."""
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT_S).run()
+    assert not at.exception
+    text = _all_markdown(at)
+    assert re.search(r"land ATL \d\d:\d\d on R[12]", text), "flight plan names the runway"
+    assert "<th>Runway</th>" in text
+    assert re.search(r"<dt>Runway</dt><dd>R[12]</dd>", text), "outcome has a Runway row"
