@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -35,6 +36,12 @@ def variant_tag(stress: Stress | None) -> str:
     return "+".join(flags) if flags else "base"
 
 
+def has_api_key() -> bool:
+    """True when an Anthropic API key is configured. Without one, live LLM calls fail on
+    authentication; failing fast here beats a run where every agent 'times out'."""
+    return bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
+
+
 def recordings_dir_for(stress: Stress | None) -> Path:
     return config.RECORDINGS_DIR / variant_tag(stress)
 
@@ -47,6 +54,10 @@ def make_agents(mode: AgentMode = "rule", record: bool = False,
         return {AgentRole.ATC: RuleATC(), AgentRole.PILOT: RulePilot(), AgentRole.GROUND: RuleGround()}
     if mode not in _LAZY:
         raise ValueError(f"unknown agent mode {mode!r}; expected 'rule', 'llm' or 'replay'")
+    if mode == "llm" and not has_api_key():
+        raise AgentModeUnavailable(
+            "LLM mode needs ANTHROPIC_API_KEY (in .env locally, or in Streamlit Cloud > Settings > Secrets). "
+            "Use Replay to show recorded Claude runs, or Rule for scripted agents.")
     module_name, func_name = _LAZY[mode]
     try:
         module = importlib.import_module(module_name)

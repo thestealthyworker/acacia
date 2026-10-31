@@ -393,3 +393,12 @@ def test_each_stress_combination_records_into_its_own_variant_folder(monkeypatch
     assert recordings_dir_for(Stress(corrupt_solver=True)) == tmp_path / "corrupt_solver"
     replay = make_agents("replay", stress=Stress(tight_crew=True))
     assert all(a.recordings_dir == tmp_path / "tight_crew" for a in replay.values())
+
+
+def test_llm_mode_without_api_key_fails_fast_with_a_clear_message(monkeypatch) -> None:
+    from acacia.agents.factory import AgentModeUnavailable
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    with pytest.raises(AgentModeUnavailable, match="ANTHROPIC_API_KEY"):
+        make_agents("llm")
+    assert set(make_agents("rule")) == set(AgentRole)  # other modes are unaffected
