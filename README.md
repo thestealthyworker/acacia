@@ -1,3 +1,3 @@
-# Acacia Hackathon
+# Acacia
 
-Project workspace for the Acacia Hackathon.
+Project workspace for Acacia.
