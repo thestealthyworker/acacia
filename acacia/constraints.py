@@ -331,4 +331,9 @@ REGISTRY: tuple[ConstraintItem, ...] = (
                    "LLM mode only: a negotiation longer than 3 min of real time falls back with the reason "
                    "logged; wall time is logged outside the hash chain", "ASSUMED",
                    "rule and replay runs stay deterministic"),
+    ConstraintItem("TIME-8", "rules_of_play", "Dispatch order across clusters", "HANDOVER 18.6 / FABLE 6: "
+                   "clusters by best-ranked member", "safety tier first; then clusters by earliest decision "
+                   "deadline (best rank, then cluster_id, break ties); rank order inside a cluster",
+                   "CHANGED", "the shared clock (TIME-6) makes time order matter: a later cluster run first "
+                   "pushes earlier landings past their deadline"),
 )

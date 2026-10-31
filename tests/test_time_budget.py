@@ -23,7 +23,7 @@ from acacia.coordinator import run_all
 from acacia.fallback import plan_fallback
 from acacia.models import (
     AgentRole, AtcPrivate, ConsensusRecord, ConstraintPacket, EmptyLedgerView, GroundPrivate, HardLimit,
-    Option, PilotPrivate, PrivateState, ReasonCode, ResolutionPackage, SoftPref, Verdict,
+    Option, PilotPrivate, PrivateState, ReasonCode, ResolutionPackage, SoftPref, Stress, Verdict,
 )
 from acacia.simulate import build_private
 from acacia.solver import solve
@@ -323,3 +323,48 @@ def test_dispatcher_clock_is_monotonic_and_cumulative(tmp_path) -> None:
         assert "clock" in e.text.lower()
         first = next(x for x in d.logs[e.payload["event_id"]] if x.type == "DisruptionEvent")
         assert first.payload["decision_time"] == clock["decision_time"]
+
+
+# --- 10. TIME-8: clusters dispatch in deadline order, tier 0 still first ---------------------------------
+def _fixture_dispatcher(tmp_path, stress=None):
+    from pathlib import Path
+
+    from acacia import config
+    from acacia.data import DataStore
+    from acacia.dispatcher import Dispatcher
+    from acacia.ledger import Ledger
+
+    root = Path(__file__).resolve().parent.parent
+    store = DataStore(root / "data", flights_path=root / "tests" / "fixtures" / "multi_trigger_day.csv",
+                      airports_path=root / "data" / "sample_airports.csv")
+    return Dispatcher(store, make_agents("rule"), Ledger("2015-03-12", runs_dir=tmp_path), config.IMPACT_POLICY,
+                      stress)
+
+
+def _dispatched_codes(d, entries) -> list[str]:
+    return [d.events[e.event_id].flight.code for e in entries if e.type == "DISPATCH"]
+
+
+def test_clusters_dispatch_by_earliest_deadline_and_queue_matches(tmp_path) -> None:
+    d = _fixture_dispatcher(tmp_path)
+    d.collect(scan=("ATL", "2015-03-12", 180))
+    entries = list(d.run())
+    codes = _dispatched_codes(d, entries)
+    # the 12:xx cluster (earliest landing 12:30) runs before the 14:xx cluster, though DL204 has the top impact
+    assert codes[:3] == ["DL201", "DL203", "DL202"] and codes[3:] == ["DL204", "DL205"]
+    queue = next(e for e in entries if e.type == "TriggerQueue")
+    assert [it["event_id"] for it in queue.payload["items"]] == [e.event_id for e in entries if e.type == "DISPATCH"]
+    assert "earliest decision deadline" in queue.text
+    rec = {d.events[k].flight.code: v for k, v in d.records.items()}
+    assert not any(r.package.get("divert") for r in rec.values())  # the clock causes no unstressed divert
+
+
+def test_tier_zero_still_dispatches_before_earlier_deadline_clusters(tmp_path) -> None:
+    probe = _fixture_dispatcher(tmp_path / "probe")
+    probe.collect(scan=("ATL", "2015-03-12", 180))
+    dl205 = next(e for e, ev in probe.events.items() if ev.flight.code == "DL205")
+    d = _fixture_dispatcher(tmp_path / "run", stress={dl205: Stress(low_fuel=True)})
+    d.collect(scan=("ATL", "2015-03-12", 180))
+    entries = list(d.run())
+    assert d.assessments[dl205].tier == 0
+    assert _dispatched_codes(d, entries)[:4] == ["DL205", "DL201", "DL203", "DL202"]

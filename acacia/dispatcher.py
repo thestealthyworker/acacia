@@ -175,12 +175,14 @@ class Dispatcher:
 
     # --- cluster and queue -----------------------------------------------------------------------
     def _cluster(self) -> Iterator[LogEntry]:
-        self.clusters = triage.cluster(list(self.events.values()), list(self.assessments.values()), self.graph)
+        self.clusters = triage.deadline_cluster_order(
+            triage.cluster(list(self.events.values()), list(self.assessments.values()), self.graph), self.assessments)
         for c in self.clusters:
             for eid in c.event_ids:
                 self.assessments[eid] = self.assessments[eid].model_copy(update={"cluster_id": c.cluster_id})
         self._emit("STATE", f"{len(self.clusters)} cluster(s) from {len(self.events)} trigger(s); clusters "
-                   "ordered by their best-ranked member, members in rank order (tier, then impact).",
+                   "ordered by earliest decision deadline (TIME-8: the shared clock makes time order matter), "
+                   "then best-ranked member; members in rank order (tier, then impact).",
                    state="CLUSTERING", payload={"clusters": [c.cluster_id for c in self.clusters]})
         for c in self.clusters:
             codes = ", ".join(self.events[e].flight.code for e in c.event_ids)
@@ -189,22 +191,17 @@ class Dispatcher:
         self._reorder()
         q = self.queue()
         head = q.items[0]
-        self._emit("TriggerQueue", f"Queue of {len(q.items)}: ranked by safety tier first (a gate, not a weight), "
-                   f"then impact, deadline, event_id. {self.events[head.event_id].flight.code} first: tier "
-                   f"{head.tier}, impact {head.impact_score}.", payload=q.model_dump(mode="json"))
+        self._emit("TriggerQueue", f"Queue of {len(q.items)} in dispatch order: safety tier first (a gate, not a "
+                   "weight), then clusters by earliest decision deadline (TIME-8), then impact, deadline, event_id "
+                   f"inside a cluster. {self.events[head.event_id].flight.code} first: tier {head.tier}, impact "
+                   f"{head.impact_score}, deadline {head.decision_deadline}.", payload=q.model_dump(mode="json"))
         self._emit("STATE", "Dispatching clusters in order; each event gets a fresh ledger view.",
                    state="DISPATCHING", payload={"order": list(self._order)})
         yield from self._flush()
 
-    def _rank_key(self, eid: str) -> tuple:
-        a = self.assessments[eid]
-        return (a.tier, -a.impact_score, to_min(a.decision_deadline), eid)
-
     def _reorder(self) -> None:
-        """Tier 0 first (any cluster), then cluster order, then rank within the cluster."""
-        cluster_idx = {eid: i for i, c in enumerate(self.clusters) for eid in c.event_ids}
-        self._order = sorted(self.events, key=lambda e: (self.assessments[e].tier, cluster_idx.get(e, 0),
-                                                         self._rank_key(e)))
+        """Tier 0 first (any cluster), then clusters by earliest deadline (TIME-8), then rank inside."""
+        self._order = triage.dispatch_order(self.clusters, {e: self.assessments[e] for e in self.events})
 
     def queue(self) -> TriggerQueue:
         return txt.build_queue(self._date(), self._scan[0] if self._scan else None, self._order, self.events,

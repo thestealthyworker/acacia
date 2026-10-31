@@ -138,5 +138,6 @@ Contracts other than the ADDED fields above; the state machine; turn limits; che
 | TIME-5 | Deadline guard | n/a | E - decision < 5 min: straight to the checked fallback | ASSUMED |
 | TIME-6 | Shared clock across triggers | n/a | decision time >= previous dispatched commit time | ASSUMED |
 | TIME-7 | Live wall-clock overshoot | n/a | LLM run over 3 min real time falls back; wall time not hashed | ASSUMED |
+| TIME-8 | Dispatch order across clusters | clusters by best-ranked member (HANDOVER 18.6) | tier first, then clusters by earliest decision deadline, rank inside a cluster | CHANGED (shared clock makes time order matter) |
 
 Add a row for any further deviation introduced while building.
