@@ -10,6 +10,11 @@ the informational keys `holding_fuel_kg` (when the Pilot declares `eta` and `bur
 `overtime_cost_min` (when Ground declares a G_S1 shift-end target); they are never part of the
 weighted score, which sums the POLICY keys only.
 
+policy-0.2 `delay` utility (declared-only, no soft preference behind it, so it cannot be cut):
+clamp(1 - (gate_arr - (eta + taxi_in)) / (land_by - eta), 0, 1), with eta the Pilot's declared
+`eta` fact (else the P_S2 target, like fuel) and land_by the Pilot's P_H1. It rewards the earliest
+gate arrival the declarations allow; neutral (1.0) when eta or land_by is not declared.
+
 TIME-3/4: a slot before the ATC's declared A_H3 SLOT_LEAD earliest slot is discarded SLOT_LEAD,
 and the G_H3 gate-change notice counts from the declared commit_time.
 
@@ -32,7 +37,7 @@ from acacia.models import (
 )
 from acacia.timeutil import is_hhmm, to_hhmm, to_min
 
-SOLVER_VERSION = "solver-0.5"
+SOLVER_VERSION = "solver-0.6"
 FUEL_SPAN_MIN = SPARE_HOLDING_MIN  # FUEL-5: used when the Pilot declares no earliest landing
 CONNECTION_SPAN_MIN = 30
 OVERTIME_SPAN_MIN = 60
@@ -226,7 +231,7 @@ def _utility(d: _Decl, metric: str, target: object, slot: int, demand: int, gate
     if metric == "fuel_margin":
         if d.land_by is None:
             return NO_PREF_UTILITY
-        eta = d.eta if d.eta is not None else (to_min(target) if is_hhmm(target) else None)
+        eta = _declared_eta(d, target)
         span = d.land_by - eta if eta is not None and eta < d.land_by else FUEL_SPAN_MIN
         return min(1.0, max(0.0, (d.land_by - slot) / span))
     if metric == "turnaround_done_by":
@@ -235,6 +240,24 @@ def _utility(d: _Decl, metric: str, target: object, slot: int, demand: int, gate
     if metric == "keep_gate":
         return 1.0 if target in (None, gate) else OTHER_GATE_UTILITY
     raise ValueError(f"unknown soft-preference metric {metric!r}")
+
+
+def _declared_eta(d: _Decl, fuel_target: object = None) -> int | None:
+    """The Pilot's declared earliest landing: the `eta` fact, else the P_S2 fuel_margin target."""
+    if d.eta is not None:
+        return d.eta
+    if not is_hhmm(fuel_target):
+        fuel_target = next((t for m, _, t in d.prefs.values() if m == "fuel_margin" and is_hhmm(t)), None)
+    return to_min(fuel_target) if is_hhmm(fuel_target) else None
+
+
+def _delay_utility(d: _Decl, slot: int, taxi_in: int) -> float:
+    """policy-0.2 delay: 1 at the declared earliest gate arrival (eta + taxi_in), 0 at land_by."""
+    eta = _declared_eta(d)
+    if eta is None or d.land_by is None or d.land_by <= eta:
+        return NO_PREF_UTILITY
+    late = (slot + taxi_in) - (eta + taxi_in)
+    return min(1.0, max(0.0, 1 - late / (d.land_by - eta)))
 
 
 def _overtime(d: _Decl, shift_end: object, gate_arr: int) -> int | None:
@@ -266,8 +289,9 @@ def _by_metric(d: _Decl, utils: dict[str, float], metric: str) -> float:
     return min(vals) if vals else NO_PREF_UTILITY
 
 
-def _breakdown(d: _Decl, utils: dict[str, float]) -> dict[str, float]:
+def _breakdown(d: _Decl, utils: dict[str, float], slot: int, taxi_in: int) -> dict[str, float]:
     comp = {
+        "delay": _delay_utility(d, slot, taxi_in),
         "throughput": _by_metric(d, utils, "slot_demand"),
         "connections": _by_metric(d, utils, "gate_arrival_by"),
         "fuel": _by_metric(d, utils, "fuel_margin"),
@@ -329,7 +353,7 @@ def _candidate(d: _Decl, pid: str, option: tuple[int, int, str | None], gate: st
                turn: int, cuts: list[Cut], tried: set[str]) -> Candidate:
     slot, demand, runway = option
     utils = _utilities(d, slot, demand, gate, taxi_in)
-    bd = _breakdown(d, utils)
+    bd = _breakdown(d, utils, slot, taxi_in)
     why = _discard(d, slot, gate, taxi_in)
     score = round(sum(bd.values()), 6)  # weighted POLICY keys only
     pkg = ResolutionPackage(event_id=d.event_id, package_id=pid, turn=turn, slot=to_hhmm(slot),

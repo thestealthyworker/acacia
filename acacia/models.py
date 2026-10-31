@@ -156,7 +156,7 @@ class ResolutionPackage(BaseModel):
     route_change: str | None = None
     runway: str | None = None  # ADDED: CAP-9 arrival runway of the slot; None = legacy merged stream
     score: float
-    score_breakdown: dict[str, float]  # throughput, connections, fuel, turnaround
+    score_breakdown: dict[str, float]  # config.POLICY keys (policy-0.2: delay, connections, throughput, turnaround, fuel) + info keys
     satisfies_hard: bool = True
 
 

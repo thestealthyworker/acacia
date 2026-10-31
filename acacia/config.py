@@ -41,12 +41,17 @@ RUNS_DIR: Path = ROOT_DIR / "runs"
 RECORDINGS_DIR: Path = ROOT_DIR / "recordings"
 
 # --- scoring policy (HANDOVER 7) ---------------------------------------------------------
-POLICY_VERSION = "policy-0.1"
+# policy-0.2 (owner-approved, DECISIONS.md 2026-10-31): adds "delay", which rewards an earlier gate
+# arrival relative to the declared eta + taxi-in. policy-0.1 was throughput 0.35, connections 0.30,
+# fuel 0.15, turnaround 0.20 and had no delay term, so it preferred later, less contested slots.
+# Safety is never weighted: hard limits are filters (solver) and checks (checker), not scores.
+POLICY_VERSION = "policy-0.2"
 POLICY: dict[str, float] = {
-    "throughput": 0.35,
-    "connections": 0.30,
-    "fuel": 0.15,
-    "turnaround": 0.20,
+    "delay": 0.35,
+    "connections": 0.25,
+    "throughput": 0.15,
+    "turnaround": 0.15,
+    "fuel": 0.10,
 }
 
 # --- impact policy (HANDOVER 18.4) -------------------------------------------------------
