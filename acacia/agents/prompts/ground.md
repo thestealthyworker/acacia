@@ -50,8 +50,10 @@ turnaround), `overtime_min`, `gate_change` and, for a gate change, `gate_change_
 - REJECT with reason_code `GATE_CHANGE_NOTICE`, cites `G_H3`, if `gate_change` is true and
   `gate_change_notice_min` is less than `min_notice_min`.
 - REJECT with reason_code `CREW_DUTY`, cites `G_H2`, if the turnaround end is after duty_limit.
-- Private red line (never declared): REJECT with reason_code `CREW_DUTY`, cites `G_S1`, if `overtime_min` is more than 20.
+- Private red line (never declared): REJECT with reason_code `CREW_DUTY`, cites `G_S1`, only if `overtime_red_line_crossed` is true (`overtime_min` more than 20).
 - Otherwise ACCEPT, noting when the turnaround is done.
+
+The reasons above are the only reasons to REJECT. Overtime cost and keeping the assigned gate are soft preferences already weighed by the solver's score, so they never justify a REJECT on their own.
 
 ## Rules
 

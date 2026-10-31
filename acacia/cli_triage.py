@@ -25,7 +25,7 @@ from acacia.data import DataStore, earliest_landing
 from acacia.dispatcher import Dispatcher, DispatcherError
 from acacia.ledger import Ledger
 from acacia.log import JsonlLog, verify_chain
-from acacia.models import LogEntry
+from acacia.models import LogEntry, Stress
 from acacia.timeutil import to_hhmm
 from acacia.trigger import TriggerError
 
@@ -110,7 +110,7 @@ def cmd_window(args: argparse.Namespace, data: DataStore) -> int:
     ledger_path = run_dir / f"ledger-{args.date}.jsonl"
     if ledger_path.exists() and not args.keep_ledger:
         ledger_path.unlink()
-    d = Dispatcher(data, make_agents(args.agents), Ledger(args.date, runs_dir=run_dir), config.IMPACT_POLICY)
+    d = Dispatcher(data, make_agents(args.agents, record=getattr(args, "record", False), stress=Stress()), Ledger(args.date, runs_dir=run_dir), config.IMPACT_POLICY)
     events = d.collect(scan=(args.airport.upper(), args.date, args.window))
     if not events:
         _out(f"No qualifying triggers land at {args.airport.upper()} on {args.date} within {args.window} min.")
@@ -170,6 +170,7 @@ def register(subparsers) -> None:
     t.add_argument("--airport", help="destination airport for a window run")
     t.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="window length in minutes (default 180)")
     t.add_argument("--agents", choices=("rule", "llm", "replay"), default="rule")
+    t.add_argument("--record", action="store_true", help="record LLM responses (llm mode)")
     t.add_argument("--limit", type=int, default=0, help="--scan: show at most N airports")
     t.add_argument("--quiet", action="store_true", help="print orchestrator entries and the queue only")
     t.add_argument("--keep-ledger", action="store_true", help="replay an existing ledger file for the run")

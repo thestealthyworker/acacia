@@ -140,7 +140,7 @@ def prepare(data: DataStore, source: str, mode: str, stress: Stress, *, scan: tu
             payloads: list[dict] | None = None, preempt_lowest: bool = False) -> WindowRun:
     """Collect the triggers and apply the header stress to every one; nothing is negotiated yet."""
     try:
-        agents = make_agents(mode.lower())
+        agents = make_agents(mode.lower(), stress=stress)
     except (AgentModeUnavailable, ValueError) as exc:
         raise WindowInputError(f"{mode} agents unavailable: {exc}") from exc
     date = scan[1] if scan else _payload_date(payloads)

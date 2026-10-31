@@ -99,7 +99,7 @@ def _run_one(event: DisruptionEvent, stress: Stress, agents: dict, data: DataSto
 def cmd_run(args: argparse.Namespace) -> int:
     data = DataStore()
     event, stress = _event_for(args, data)
-    agents = make_agents(args.agents, record=args.record)
+    agents = make_agents(args.agents, record=args.record, stress=stress)
     out_path = Path(args.out) if args.out else run_path(event.event_id)
     rec, entries = _run_one(event, stress, agents, data, out_path, args.quiet)
     ok, bad = verify_chain(entries)
@@ -122,7 +122,8 @@ def cmd_batch(args: argparse.Namespace) -> int:
     if rows.empty:
         _out(f"No qualifying flights on {args.date}.")
         return 0
-    agents, stress = make_agents(args.agents), stress_from(args)
+    stress = stress_from(args)
+    agents = make_agents(args.agents, stress=stress)
     out_dir = Path(args.out_dir) if args.out_dir else None
     _out(f"{'flight':<10} {'route':<8} {'outcome':<9} {'turns':<5} {'checker':<7} plan")
     for _, row in rows.iterrows():

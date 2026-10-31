@@ -49,6 +49,8 @@ Copy these values exactly from your private state:
   on the package's `runway` (a slot that is not free is not wake-separated).
 - Otherwise ACCEPT (you may mention in the rationale that the slot is contested).
 
+This is the only reason to REJECT. Slot demand is a soft preference already weighed by the solver's score.
+
 ## Rules
 
 - Declare only facts you own.

@@ -12,7 +12,7 @@ import threading
 from dataclasses import dataclass, field
 
 from acacia import config
-from acacia.agents.factory import AgentModeUnavailable, make_agents
+from acacia.agents.factory import AgentModeUnavailable, make_agents, recordings_dir_for
 from acacia.coordinator import run as run_coordinator
 from acacia.log import verify_chain
 from acacia.models import ConsensusRecord, DisruptionEvent, LogEntry, Stress
@@ -50,16 +50,17 @@ class RunState:
         return self.done and self.idx >= len(self.entries)
 
 
-def has_recordings(event_id: str) -> bool:
-    folder = config.RECORDINGS_DIR / event_id
+def has_recordings(event_id: str, stress: Stress | None = None) -> bool:
+    """Recordings exist for this event in the variant folder of `stress` (base when None)."""
+    folder = recordings_dir_for(stress) / event_id
     try:
         return folder.is_dir() and any(folder.glob("*.json"))
     except OSError:
         return False
 
 
-def default_mode(event_id: str | None) -> str:
-    return "Replay" if event_id and has_recordings(event_id) else "Rule"
+def default_mode(event_id: str | None, stress: Stress | None = None) -> str:
+    return "Replay" if event_id and has_recordings(event_id, stress) else "Rule"
 
 
 def run_key(event: DisruptionEvent, mode: str, stress: Stress) -> tuple:
@@ -69,7 +70,7 @@ def run_key(event: DisruptionEvent, mode: str, stress: Stress) -> tuple:
 def _collect(state: RunState, stress: Stress, data: object) -> None:
     """Drain the coordinator generator into state.entries; errors end the run visibly."""
     try:
-        agents = make_agents(state.mode.lower())
+        agents = make_agents(state.mode.lower(), stress=stress)
         for entry in run_coordinator(state.event, stress, agents, data=data):
             state.entries.append(entry)
     except AgentModeUnavailable as exc:

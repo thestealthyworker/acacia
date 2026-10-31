@@ -379,3 +379,17 @@ def test_stress_variants_of_one_event_replay_their_own_recordings(event, tmp_pat
         replay = ReplayAgent(AgentRole.PILOT, recordings_dir=tmp_path)
         assert replay.declare(event, PILOT) == recorded["base"]
         assert replay.declare(event, variant) == recorded["variant"]
+
+
+def test_each_stress_combination_records_into_its_own_variant_folder(monkeypatch, tmp_path) -> None:
+    from acacia import config as _config
+    from acacia.agents.factory import recordings_dir_for, variant_tag
+    from acacia.models import Stress
+
+    monkeypatch.setattr(_config, "RECORDINGS_DIR", tmp_path)
+    assert variant_tag(None) == variant_tag(Stress()) == "base"
+    assert variant_tag(Stress(tight_crew=True)) == "tight_crew"
+    assert variant_tag(Stress(low_fuel=True, corrupt_solver=True)) == "low_fuel+corrupt_solver"
+    assert recordings_dir_for(Stress(corrupt_solver=True)) == tmp_path / "corrupt_solver"
+    replay = make_agents("replay", stress=Stress(tight_crew=True))
+    assert all(a.recordings_dir == tmp_path / "tight_crew" for a in replay.values())

@@ -48,6 +48,13 @@ def _all_markdown(at: AppTest) -> str:
     return "\n".join(m.value for m in at.markdown)
 
 
+@pytest.fixture(autouse=True)
+def _no_recordings(tmp_path, monkeypatch):
+    """UI tests run against an empty recordings folder so the default agent mode is Rule and the
+    rule-agent expectations hold whether or not LLM recordings are committed."""
+    monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path / "recordings")
+
+
 def test_app_loads_without_exception() -> None:
     at = AppTest.from_file(APP, default_timeout=TIMEOUT_S).run()
     assert not at.exception

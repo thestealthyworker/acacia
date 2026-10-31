@@ -26,6 +26,7 @@ from acacia.agents.declared import (  # noqa: F401  (re-exported for callers and
     WAKE_CLASSES, crew_duty_hhmm, decision_time_min, gate_notice_value, slot_lead_value, slot_options,
     slot_sequence_value, wake_value,
 )
+from acacia.agents.rule import CONNECTION_LOSS_MIN, GROUND_RED_LINE_OVERTIME, PILOT_RED_LINE_PAX
 from acacia.constraints import commit_time_min
 from acacia.models import (
     AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, PilotPrivate,
@@ -139,13 +140,18 @@ def _derived(role: AgentRole, event: DisruptionEvent, package: ResolutionPackage
     gate_arr = slot + event.taxi_in
     p = coerce_private(role, private)
     if isinstance(p, PilotPrivate):
+        late = gate_arr - p.connect_by
         return {"gate_arrival": to_hhmm(gate_arr), "fuel_margin_min": p.land_by - slot,
-                "crew_duty_margin_min": None if p.crew_duty_end is None else p.crew_duty_end - gate_arr}
+                "crew_duty_margin_min": None if p.crew_duty_end is None else p.crew_duty_end - gate_arr,
+                "connection_late_min": late,
+                "connection_red_line_crossed": late >= CONNECTION_LOSS_MIN and p.pax >= PILOT_RED_LINE_PAX}
     if isinstance(p, GroundPrivate):
         done = gate_arr + p.min_turn
         change = package.gate != p.assigned_gate
         return {"gate_arrival": to_hhmm(gate_arr), "turnaround_end": to_hhmm(done),
-                "overtime_min": max(0, done - p.shift_end), "gate_change": change,
+                "overtime_min": max(0, done - p.shift_end),
+                "overtime_red_line_crossed": max(0, done - p.shift_end) > GROUND_RED_LINE_OVERTIME,
+                "gate_change": change,
                 "gate_change_notice_min": gate_arr - commit_time_min(event) if change else None}
     return {}
 

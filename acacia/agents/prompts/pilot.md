@@ -47,8 +47,10 @@ The request gives the package's gate arrival time (slot + taxi-in), `fuel_margin
 - REJECT with reason_code `CREW_DUTY`, cites `P_H2`, if `crew_duty_margin_min` is negative (flight crew 13 h duty limit).
 
 - REJECT with reason_code `FUEL_LIMIT`, cites `P_H1`, if `fuel_margin_min` is negative (slot later than land_by). A slot exactly at land_by is acceptable.
-- Private red line (never declared): REJECT with reason_code `CONNECTION_RISK`, cites `P_S1`, if gate arrival is at or after connect_by + 30 minutes AND connecting passengers >= 25.
+- Private red line (never declared): REJECT with reason_code `CONNECTION_RISK`, cites `P_S1`, only if `connection_red_line_crossed` is true (gate arrival at or after connect_by + 30 minutes AND connecting passengers >= 25).
 - Otherwise ACCEPT, noting `fuel_margin_min` and whether connections are protected.
+
+The reasons above are the only reasons to REJECT. Your soft preferences are already weighed by the solver's score, so a package that is somewhat late for connections but has `connection_red_line_crossed` false must be ACCEPTED. Rejecting on a soft preference below the red line blocks consensus and is not allowed.
 
 ## Rules
 
