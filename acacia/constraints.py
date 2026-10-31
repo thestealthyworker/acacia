@@ -49,6 +49,9 @@ GROUND_OVERTIME_RED_LINE_MIN = 20        # CREW-3
 TIGHT_CREW_SLACK_MIN = 25
 GATE_CHANGE_NOTICE_MIN = 20              # GATE-1
 DEFAULT_DECISION_LEAD_MIN = 30           # GATE-1: decision time = E - 30 when nothing injected
+NEGOTIATION_BUDGET_MIN = 3               # TIME-1: 3 turns x 1 min of simulated negotiation time
+SIGNOFF_BUDGET_MIN = 2                   # TIME-2: human sign-off time after the record is ready
+SLOT_LEAD_MIN = 5                        # TIME-3: earliest landing slot = commit time + 5 min
 
 Storm = Literal["none", "moderate", "severe"]
 
@@ -193,6 +196,32 @@ def decision_time_min(event: DisruptionEvent) -> int:
     return to_min(event.eta_landing) - DEFAULT_DECISION_LEAD_MIN
 
 
+def time_budget_min() -> int:
+    """Simulated minutes between the decision time and the commit time (TIME-1 + TIME-2)."""
+    return NEGOTIATION_BUDGET_MIN + SIGNOFF_BUDGET_MIN
+
+
+def commit_time_for(decision_time: int) -> int:
+    """Commit time for a decision time in minutes: decision + negotiation + sign-off budget."""
+    return decision_time + time_budget_min()
+
+
+def commit_time_min(event: DisruptionEvent) -> int:
+    """When the plan is approved and can execute (TIME-1, TIME-2): decision_time + 3 + 2 min.
+    The clock no longer freezes at decision_time; slots and the gate-change notice count from here."""
+    return commit_time_for(decision_time_min(event))
+
+
+def earliest_slot_min(event: DisruptionEvent) -> int:
+    """Earliest landing slot that can still be offered (TIME-3): commit_time + 5 min."""
+    return commit_time_min(event) + SLOT_LEAD_MIN
+
+
+def has_time_to_negotiate(event: DisruptionEvent) -> bool:
+    """Deadline guard (TIME-5): E - decision_time must cover the whole time budget."""
+    return to_min(event.eta_landing) - decision_time_min(event) >= time_budget_min()
+
+
 def crew_duty_end(sched_arrival: int, scheduled_time: int | None) -> int | None:
     """Flight-crew duty end on the destination clock (CREW-1): report = scheduled departure - 60,
     where scheduled departure = scheduled arrival - SCHEDULED_TIME; None without a block time."""
@@ -243,7 +272,8 @@ REGISTRY: tuple[ConstraintItem, ...] = (
     ConstraintItem("CREW-3", "fuel_and_crew", "Ground max overtime", "not stated",
                    "45 min hard; reject over 20 min (red line)", "ASSUMED"),
     ConstraintItem("GATE-1", "fuel_and_crew", "Gate-change notice", ">= 20 min before arrival",
-                   "HARD; decision time = disruption start or E - 30", "ASSUMED", "limit as given, decision time assumed"),
+                   "HARD; decision time = disruption start or E - 30; notice counted from the commit time "
+                   "(TIME-4)", "ASSUMED", "limit as given, decision time assumed"),
     ConstraintItem("GATE-2", "fuel_and_crew", "Remote stands", "not stated",
                    "REMOTE-1..9, each one bookable stand; a remote stand counts as a gate change",
                    "ASSUMED"),
@@ -280,4 +310,25 @@ REGISTRY: tuple[ConstraintItem, ...] = (
                    f"{GROUND_OVERTIME_RED_LINE_MIN} min red line, within the {GROUND_MAX_OVERTIME_MIN} min hard limit)",
                    "ASSUMED", "demo stress lever for scenario D; the kit's 6 min gave about 7 min overtime, "
                    "under the red line, and drifted when the first slot moved"),
+    ConstraintItem("TIME-1", "rules_of_play", "Negotiation time budget", "not stated",
+                   "3 min of simulated time (3 turns x 1 min); the clock no longer freezes at the decision time",
+                   "ASSUMED", "worst case live: about 9 AI calls x 20 s plus one retry each"),
+    ConstraintItem("TIME-2", "rules_of_play", "Human sign-off time", "not stated",
+                   "2 min; commit time = decision time + 3 + 2", "ASSUMED"),
+    ConstraintItem("TIME-3", "rules_of_play", "Slot lead after commit", "not stated",
+                   "landing slots at or after commit time + 5 min (ATC, solver, checker, fallback)", "ASSUMED",
+                   "an approved plan never offers a slot already in the past"),
+    ConstraintItem("TIME-4", "fuel_and_crew", "Gate-change notice reference", "before arrival",
+                   "measured from the commit time, not the decision time", "ASSUMED",
+                   "notice is only real once the plan is approved"),
+    ConstraintItem("TIME-5", "rules_of_play", "Deadline guard", "not stated",
+                   "E - decision time < 5 min budget: no negotiation, straight to the checked fallback",
+                   "ASSUMED"),
+    ConstraintItem("TIME-6", "rules_of_play", "Shared clock across triggers", "not stated",
+                   "each dispatched event's decision time >= the previous dispatched event's commit time",
+                   "ASSUMED", "later triggers see later decision times"),
+    ConstraintItem("TIME-7", "rules_of_play", "Live wall-clock overshoot", "not stated",
+                   "LLM mode only: a negotiation longer than 3 min of real time falls back with the reason "
+                   "logged; wall time is logged outside the hash chain", "ASSUMED",
+                   "rule and replay runs stay deterministic"),
 )

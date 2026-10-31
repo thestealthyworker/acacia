@@ -66,6 +66,12 @@ def _limits_box(event: DisruptionEvent) -> str:
     return f'<div class="wb-box"><b>Workbook limits at {esc(dest)}</b> {assumed}{_kv(rows)}</div>'
 
 
+def _commit_text(event: DisruptionEvent) -> str:
+    """TIME-1..3: decision + negotiation + sign-off budget, and the earliest slot after it."""
+    return (f"{to_hhmm(constraints.commit_time_min(event))} (+{constraints.NEGOTIATION_BUDGET_MIN}+"
+            f"{constraints.SIGNOFF_BUDGET_MIN} min); slots from {to_hhmm(constraints.earliest_slot_min(event))}")
+
+
 def event_card(event: DisruptionEvent) -> None:
     f = event.flight
     with st.container(border=True):
@@ -76,7 +82,8 @@ def event_card(event: DisruptionEvent) -> None:
                   f'{esc(f.date)} · tail {esc(f.tail)} · {scenario_chip(event.scenario_type.value)}</div>'
                   + _kv([("Scheduled", event.sched_arrival), ("Actual (history)", event.hist_arrival),
                          ("Delay", f"{event.hist_delay_min} min"), ("Earliest landing E", event.eta_landing),
-                         ("Taxi-in", f"{event.taxi_in} min"), ("Decision time", event.decision_time or "—")])
+                         ("Taxi-in", f"{event.taxi_in} min"), ("Decision time", event.decision_time or "—"),
+                         ("Commit (simulated)", _commit_text(event))])
                   + _cause_bar(event))
             inj = "".join(f"<div>{sim_chip()} <b>{esc(i.type.replace('_', ' ').title())}</b> {esc(i.start)}–{esc(i.end)}: "
                           f"{esc(i.ref)}</div>" for i in event.injected)
@@ -103,7 +110,7 @@ def _value(rule: str, v: object) -> str:
     if rule == "WAKE_SEPARATION" and isinstance(v, dict):
         return f"workbook table, own class {v.get('own_class', '?')}"
     if rule == "GATE_CHANGE_NOTICE" and isinstance(v, dict):
-        return (f"≥ {v.get('min_notice_min')} min, decided {v.get('decision_time')}, "
+        return (f"≥ {v.get('min_notice_min')} min from commit {v.get('commit_time') or v.get('decision_time')}, "
                 f"assigned {v.get('assigned_gate') or 'unknown'}")
     if isinstance(v, dict):
         return ", ".join(f"{k} {val if val is not None else 'unavailable'}" for k, val in v.items())
@@ -147,8 +154,8 @@ def _ground_workbook(p: dict, event: DisruptionEvent) -> list[str]:
     n = hard(p, "GATE_CHANGE_NOTICE")
     if n and isinstance(n.get("value"), dict):
         v = n["value"]
-        out.append(f"Gate-change notice ≥ {v.get('min_notice_min')} min before gate arrival (HARD), decided "
-                   f"{v.get('decision_time')}, assigned {v.get('assigned_gate') or 'unknown'}")
+        out.append(f"Gate-change notice ≥ {v.get('min_notice_min')} min before gate arrival (HARD), from commit "
+                   f"{v.get('commit_time') or v.get('decision_time')} (TIME-4), assigned {v.get('assigned_gate') or 'unknown'}")
     facts = p.get("facts_owned") or {}
     d = hard(p, "CREW_DUTY_LIMIT")
     if d:

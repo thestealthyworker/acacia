@@ -4,9 +4,10 @@ COLLECTING -> TRIAGING -> CLUSTERING -> DISPATCHING -> DRAINED. Triggers are col
 the airport world is built ONCE per destination from every collected trigger's injected events
 (PLAN 2.A.2); triage uses the constraint-based `land_by` and first separated slot from
 `simulate`; events run in rank order, each with a fresh ledger view. Only this module writes
-the ledger (HELD on COMMITTED or non-divert FALLBACK; sign-off commits or releases). The
-orchestrator log is its own hash chain (`who = "orchestrator"`); each DISPATCH entry's seq and
-hash go into the started event's first entry as `dispatched_by`. `preempt` may be called
+the ledger (HELD on COMMITTED or non-divert FALLBACK; sign-off commits or releases). A shared
+simulated clock gives each dispatched event a decision time >= the previous one's commit time
+(TIME-6). The orchestrator log is its own hash chain (`who = "orchestrator"`); each DISPATCH
+entry's seq and hash go into the started event's first entry as `dispatched_by`. `preempt` may be called
 between the entries `run` yields. Nothing here prints or calls an LLM.
 """
 
@@ -17,6 +18,7 @@ from collections.abc import Iterator, Sequence
 
 from acacia import constraints, coordinator, simulate, triage, trigger
 from acacia import dispatcher_text as txt
+from acacia.coordinator_clock import clock_text, shared_clock
 from acacia.graph import ImpactGraph
 from acacia.ledger import DoubleBookingError, Ledger, LedgerStateError
 from acacia.log import LogChain
@@ -61,6 +63,7 @@ class Dispatcher:
         self._negotiating: str | None = None
         self._preempt_by: str | None = None
         self._hold_attempts: dict[str, int] = {}
+        self._clock: int | None = None  # TIME-6: commit time of the last dispatched event
 
     # --- log -------------------------------------------------------------------------------------
     def _emit(self, type_: str, text: str, *, event_id: str | None = None, state: str | None = None,
@@ -216,7 +219,8 @@ class Dispatcher:
             yield from self._dispatch_one(eid)
 
     def _dispatch_one(self, eid: str) -> Iterator[LogEntry]:
-        event, stress = self.events[eid], self.stress[eid]
+        event, clock = shared_clock(self.events[eid], self._clock)
+        self._clock, stress = to_min(clock["commit_time"]), self.stress[eid]
         if self._preempt_by == eid:
             self._preempt_by = None
         self.status[eid], self._negotiating = "NEGOTIATING", eid
@@ -224,9 +228,10 @@ class Dispatcher:
         again = " (re-run)" if self.preempted[eid] or self._hold_attempts.get(eid) else ""
         d = self._emit("DISPATCH", f"Dispatching {event.flight.code}{again}: rank {self._order.index(eid) + 1}, "
                        f"tier {a.tier}, impact {a.impact_score}, cluster {a.cluster_id}. Fresh ledger view "
-                       f"with {len(self.ledger.all_reservations())} reservation(s) so far.", event_id=eid,
-                       state="NEGOTIATING", payload={"event_id": eid, "stress": stress.model_dump(),
-                                                     "cluster_id": a.cluster_id, "tier": a.tier})
+                       f"with {len(self.ledger.all_reservations())} reservation(s) so far." + clock_text(clock),
+                       event_id=eid, state="NEGOTIATING",
+                       payload={"event_id": eid, "stress": stress.model_dump(), "cluster_id": a.cluster_id,
+                                "tier": a.tier, "clock": clock})
         yield from self._flush()
         dispatched_by = {"seq": d.seq, "hash": d.hash}
         last = yield from self._negotiate(event, stress, dispatched_by)

@@ -13,7 +13,8 @@ constraints.TIGHT_CREW_SLACK_MIN (KIT-6), so overtime at the earliest slot sits 
 20 min red line and the 45 min hard duty limit.
 Every draw is always made, even when a weather queue or a stress flag overrides it, so a
 stress flag changes only the value it targets. land_by is no longer drawn: it is
-E + 45 + contingency (CONSTRAINTS.md 4).
+E + 45 + contingency (CONSTRAINTS.md 4). The first slot is never before commit_time + 5
+(TIME-3): decision time + negotiation and sign-off budget + slot lead.
 
 Everything here is simulated and must be labelled so in the UI.
 """
@@ -84,7 +85,8 @@ def _neighbours(world: AirportWorld, view: LedgerView, start: int, end: int) -> 
 
 def _atc(event: DisruptionEvent, world: AirportWorld, view: LedgerView, rng: random.Random) -> AtcPrivate:
     eta = to_min(event.eta_landing)
-    first = eta + _queue(event, rng)
+    # TIME-3: nothing before commit_time + 5 can still be flown once the plan is approved
+    first = max(eta + _queue(event, rng), constraints.earliest_slot_min(event))
     closure = _closure_near(world, eta, first)
     own = constraints.wake_class(event.distance)
     count = SLOTS_WITH_CLOSURE if closure else SLOTS_WITHOUT_CLOSURE

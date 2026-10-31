@@ -3,8 +3,9 @@
 Red lines are private (never declared): Pilot rejects when connections are fully lost
 (gate arrival >= connect_by + 30, PLAN 3.3) and pax >= 25; Ground rejects when crew
 overtime max(0, slot + Ti + min_turn - shift_end) exceeds 20 min (PLAN 3.4).
-Hard limits follow CONSTRAINTS.md: A_H2 WAKE_SEPARATION, P_H2 FLIGHT_CREW_DUTY_END (when the
-duty end falls inside the day) and G_H3 GATE_CHANGE_NOTICE, with the same values the LLM
+Hard limits follow CONSTRAINTS.md: A_H2 WAKE_SEPARATION, A_H3 SLOT_LEAD (TIME-3), P_H2 FLIGHT_CREW_DUTY_END (when the
+duty end falls inside the day) and G_H3 GATE_CHANGE_NOTICE (notice counted from the commit
+time, TIME-4), with the same values the LLM
 agents declare (acacia.agents.declared). Pilot also states the facts `eta` and `burn_kg_per_h`
 (the solver's fuel span and holding-fuel report); Ground states `spare_gates` and `shift_start`.
 """
@@ -12,8 +13,10 @@ agents declare (acacia.agents.declared). Pilot also states the facts `eta` and `
 from __future__ import annotations
 
 from acacia.agents.base import AgentPrivate, coerce_private
-from acacia.agents.declared import crew_duty_hhmm, decision_time_min, gate_notice_value, wake_value
-from acacia.constraints import GATE_CHANGE_NOTICE_MIN, GROUND_OVERTIME_RED_LINE_MIN, burn_kg_per_h
+from acacia.agents.declared import crew_duty_hhmm, gate_notice_value, slot_lead_value, wake_value
+from acacia.constraints import (
+    GATE_CHANGE_NOTICE_MIN, GROUND_OVERTIME_RED_LINE_MIN, burn_kg_per_h, commit_time_min,
+)
 from acacia.models import (
     AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, HardLimit,
     Option, PilotPrivate, ReasonCode, ResolutionPackage, SoftPref, Verdict,
@@ -53,7 +56,8 @@ class RuleATC:
         return ConstraintPacket(
             event_id=event.event_id, agent=self.role, turn=event.turn,
             hard=[HardLimit(id="A_H1", rule="SLOT_IN_SEQUENCE", value=[to_hhmm(s) for s in slots]),
-                  HardLimit(id="A_H2", rule="WAKE_SEPARATION", value=wake_value(a.own_class))],
+                  HardLimit(id="A_H2", rule="WAKE_SEPARATION", value=wake_value(a.own_class)),
+                  HardLimit(id="A_H3", rule="SLOT_LEAD", value=slot_lead_value(event))],
             soft=[SoftPref(id="A_S1", preference="Use low-demand slots to protect sector throughput",
                            weight=0.7, metric="slot_demand")],
             options=[Option(type="SLOT", value=to_hhmm(s), demand=a.demand.get(s, 1)) for s in slots],
@@ -176,7 +180,7 @@ class RuleGround:
         if not _gate_ready(g, package.gate, gate_arr):
             return _reject(base, ReasonCode.GATE_CONFLICT, "G_H1",
                            f"Gate {package.gate} is not available at {to_hhmm(gate_arr)}.")
-        notice = gate_arr - decision_time_min(event)
+        notice = gate_arr - commit_time_min(event)  # TIME-4: counted from the commit time
         if package.gate != g.assigned_gate and notice < GATE_CHANGE_NOTICE_MIN:
             return _reject(base, ReasonCode.GATE_CHANGE_NOTICE, "G_H3",
                            f"Changing to {package.gate} gives only {notice} min notice "

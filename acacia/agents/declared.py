@@ -23,9 +23,17 @@ def wake_value(own_class: str) -> dict:
 
 
 def gate_notice_value(event: DisruptionEvent, g: GroundPrivate) -> dict:
-    """G_H3 GATE_CHANGE_NOTICE value (hard, CONSTRAINTS.md 3)."""
+    """G_H3 GATE_CHANGE_NOTICE value (hard, CONSTRAINTS.md 3); notice counts from commit_time (TIME-4)."""
     return {"min_notice_min": constraints.GATE_CHANGE_NOTICE_MIN,
-            "decision_time": to_hhmm(decision_time_min(event)), "assigned_gate": g.assigned_gate}
+            "decision_time": to_hhmm(decision_time_min(event)),
+            "commit_time": to_hhmm(constraints.commit_time_min(event)), "assigned_gate": g.assigned_gate}
+
+
+def slot_lead_value(event: DisruptionEvent) -> dict:
+    """A_H3 SLOT_LEAD value (hard, TIME-3): no landing slot before commit_time + 5 min."""
+    return {"commit_time": to_hhmm(constraints.commit_time_min(event)),
+            "slot_lead_min": constraints.SLOT_LEAD_MIN,
+            "earliest_slot": to_hhmm(constraints.earliest_slot_min(event))}
 
 
 def crew_duty_hhmm(p: PilotPrivate) -> str | None:

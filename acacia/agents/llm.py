@@ -23,8 +23,9 @@ from pydantic import BaseModel, ValidationError
 from acacia import config
 from acacia.agents.base import AgentPrivate, AgentTimeout, coerce_private
 from acacia.agents.declared import (  # noqa: F401  (re-exported for callers and tests)
-    WAKE_CLASSES, crew_duty_hhmm, decision_time_min, gate_notice_value, wake_value,
+    WAKE_CLASSES, crew_duty_hhmm, decision_time_min, gate_notice_value, slot_lead_value, wake_value,
 )
+from acacia.constraints import commit_time_min
 from acacia.models import (
     AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, PilotPrivate,
     ResolutionPackage,
@@ -88,13 +89,7 @@ def private_view(role: AgentRole, private: AgentPrivate | dict, event: Disruptio
     """The agent's own private state with times as "HH:MM", so it never has to convert minutes."""
     p = coerce_private(role, private)
     if isinstance(p, AtcPrivate):
-        slots = sorted(p.free_slots)
-        return {"first_available_slot": to_hhmm(p.first), "free_slots": [to_hhmm(s) for s in slots],
-                "slot_demand": {to_hhmm(s): p.demand.get(s, 1) for s in slots},
-                "other_traffic": [to_hhmm(t) for t in sorted(p.traffic)],
-                "traffic_wake_classes": {to_hhmm(t): c for t, c in sorted(p.traffic_classes.items())},
-                "own_wake_class": p.own_class, "wake_separation": wake_value(p.own_class),
-                "runway_closures": [{"from": to_hhmm(a), "until": to_hhmm(b)} for a, b in p.closures]}
+        return _atc_view(p, event)
     if isinstance(p, PilotPrivate):
         return {"land_by": to_hhmm(p.land_by), "connecting_pax": p.pax,
                 "connect_by": to_hhmm(p.connect_by), "low_fuel": p.low_fuel,
@@ -108,6 +103,19 @@ def private_view(role: AgentRole, private: AgentPrivate | dict, event: Disruptio
             "shift_start": to_hhmm(p.shift_start) if p.shift_start is not None else None}
     if event is not None:
         view["gate_change_notice"] = gate_notice_value(event, p)
+    return view
+
+
+def _atc_view(p: AtcPrivate, event: DisruptionEvent | None) -> dict:
+    slots = sorted(p.free_slots)
+    view = {"first_available_slot": to_hhmm(p.first), "free_slots": [to_hhmm(s) for s in slots],
+            "slot_demand": {to_hhmm(s): p.demand.get(s, 1) for s in slots},
+            "other_traffic": [to_hhmm(t) for t in sorted(p.traffic)],
+            "traffic_wake_classes": {to_hhmm(t): c for t, c in sorted(p.traffic_classes.items())},
+            "own_wake_class": p.own_class, "wake_separation": wake_value(p.own_class),
+            "runway_closures": [{"from": to_hhmm(a), "until": to_hhmm(b)} for a, b in p.closures]}
+    if event is not None:
+        view["slot_lead"] = slot_lead_value(event)
     return view
 
 
@@ -130,7 +138,7 @@ def _derived(role: AgentRole, event: DisruptionEvent, package: ResolutionPackage
         change = package.gate != p.assigned_gate
         return {"gate_arrival": to_hhmm(gate_arr), "turnaround_end": to_hhmm(done),
                 "overtime_min": max(0, done - p.shift_end), "gate_change": change,
-                "gate_change_notice_min": gate_arr - decision_time_min(event) if change else None}
+                "gate_change_notice_min": gate_arr - commit_time_min(event) if change else None}
     return {}
 
 
@@ -179,12 +187,13 @@ def recording_path(root: Path | str, event_id: str, role: AgentRole, step: Step,
 # --- declaration audit ---------------------------------------------------------------------------
 def expected_declaration(role: AgentRole, private: AgentPrivate | dict,
                          event: DisruptionEvent | None = None) -> list[tuple[str, str, str, Any]]:
-    """(kind, id, rule, value) the solver and checker rely on (CONSTRAINTS.md 2-4); G_H3 and the
-    Pilot's `eta` fact (fuel-utility span) need the event."""
+    """(kind, id, rule, value) the solver and checker rely on (CONSTRAINTS.md 2-4); A_H3, G_H3 and
+    the Pilot's `eta` fact (fuel-utility span) need the event."""
     p = coerce_private(role, private)
     if isinstance(p, AtcPrivate):
+        lead = [("hard", "A_H3", "SLOT_LEAD", slot_lead_value(event))] if event is not None else []
         return [("hard", "A_H1", "SLOT_IN_SEQUENCE", [to_hhmm(s) for s in sorted(p.free_slots)]),
-                ("hard", "A_H2", "WAKE_SEPARATION", wake_value(p.own_class))]
+                ("hard", "A_H2", "WAKE_SEPARATION", wake_value(p.own_class))] + lead
     if isinstance(p, PilotPrivate):
         duty = crew_duty_hhmm(p)
         eta = [("fact", "eta", "facts_owned", event.eta_landing)] if event is not None else []
@@ -288,6 +297,8 @@ def _retry_request(request: dict, error: InvalidOutput, tool_name: str) -> dict:
 
 class LLMAgent:
     """An ATC, Pilot or Ground agent backed by one Claude request per step."""
+
+    enforces_wall_budget = True  # TIME-7: a live run over the wall-clock budget falls back
 
     def __init__(self, role: AgentRole, client: Any = None, model: str | None = None, record: bool = False,
                  recordings_dir: Path | str | None = None, timeout: float | None = None) -> None:

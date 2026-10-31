@@ -1,7 +1,8 @@
 """Deterministic rule-based fallback plan (HANDOVER 10). No AI involved.
 
-1. Slot: the earliest ATC free slot (first-come-first-served). When the world is given, only
-   slots still wake-separated on the live runway count (`world.is_separated`, CONSTRAINTS.md 2).
+1. Slot: the earliest ATC free slot (first-come-first-served) at or after commit time + 5 min
+   (TIME-3). When the world is given, only slots still wake-separated on the live runway count
+   (`world.is_separated`, CONSTRAINTS.md 2).
 2. If there is none, or it is past land_by: DIVERT to the nearest airport by haversine
    distance from the destination, excluding the destination, the origin and airports with
    blank coordinates.
@@ -12,7 +13,7 @@
    given, the remote stand is the first REMOTE-k (k = 1..REMOTE_STANDS) not booked for that
    interval, so two fallback plans never share one stand.
 4. Gate-change notice (CONSTRAINTS.md 3, HARD): a gate other than the assigned one, remote
-   stands included, needs gate arrival - decision time >= 20 min. When the earliest slot has
+   stands included, needs gate arrival - commit time >= 20 min (TIME-4). When the earliest slot has
    no gate that meets it, the next ATC free slot (still <= land_by) is tried; if none does,
    the earliest slot is kept and the reason says so (the checker then fails the plan).
 
@@ -94,7 +95,8 @@ def _fits(world: AirportWorld | None, view: LedgerView, gate: str, start: int, m
 
 
 def _notice_ok(event: DisruptionEvent, gate_arr: int) -> bool:
-    return gate_arr - constraints.decision_time_min(event) >= constraints.GATE_CHANGE_NOTICE_MIN
+    """Gate-change notice counted from the commit time (TIME-4)."""
+    return gate_arr - constraints.commit_time_min(event) >= constraints.GATE_CHANGE_NOTICE_MIN
 
 
 def _gate_clear(private: PrivateState, gate: str, gate_arr: int, world: AirportWorld | None,
@@ -158,10 +160,11 @@ def plan_fallback(event: DisruptionEvent, private: PrivateState, airports_df: pd
     turnaround and remote-stand checks; without them the HANDOVER 10 start-time rule applies.
     """
     view = ledger_view if ledger_view is not None else EmptyLedgerView()
-    slots = _separated_slots(event, private, world, view)
+    earliest = constraints.earliest_slot_min(event)  # TIME-3: never a slot already past at commit
+    slots = [s for s in _separated_slots(event, private, world, view) if s >= earliest]
     land_by = private.pilot.land_by
     if not slots or slots[0] > land_by:
-        return _divert(event, airports_df, _no_slot_reason(private, slots, land_by))
+        return _divert(event, airports_df, _no_slot_reason(private, slots, land_by, earliest))
     slot = slots[0]
     for candidate in (s for s in slots if s <= land_by):
         picked = _gate_for_slot(event, private, candidate, world, view, ledger_view)
@@ -182,11 +185,12 @@ def plan_fallback(event: DisruptionEvent, private: PrivateState, airports_df: pd
                                "before the fuel limit.")
 
 
-def _no_slot_reason(private: PrivateState, slots: list[int], land_by: int) -> str:
+def _no_slot_reason(private: PrivateState, slots: list[int], land_by: int, earliest: int) -> str:
     """Why no slot works (CONSTRAINTS.md 6), for the divert reason."""
     if not slots:
         lost = " (the declared ones are no longer wake-separated)" if private.atc.free_slots else ""
-        return f"Feasible set empty: no separated free runway slot{lost} before LAND_BY {to_hhmm(land_by)}."
+        return (f"Feasible set empty: no separated free runway slot{lost} from {to_hhmm(earliest)} "
+                f"(commit time + {constraints.SLOT_LEAD_MIN} min) before LAND_BY {to_hhmm(land_by)}.")
     return (f"Feasible set empty: earliest separated slot {to_hhmm(slots[0])} is past "
             f"LAND_BY {to_hhmm(land_by)} (fuel limit).")
 

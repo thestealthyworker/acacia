@@ -50,6 +50,7 @@ class ReasonCode(str, Enum):
     CONNECTION_RISK = "CONNECTION_RISK"
     RESOURCE_CONFLICT = "RESOURCE_CONFLICT"  # ADDED: checker only, ledger double booking
     GATE_CHANGE_NOTICE = "GATE_CHANGE_NOTICE"  # ADDED: CONSTRAINTS.md 3, >= 20 min notice
+    SLOT_LEAD = "SLOT_LEAD"  # ADDED: TIME-3, slot at or after commit time + 5 min
 
 
 # --- event --------------------------------------------------------------------------------
@@ -320,6 +321,7 @@ class LogEntry(BaseModel):
     hash: str
     event_id: str | None = None  # ADDED: tags entries in multi-trigger streams
     dispatched_by: dict | None = None  # ADDED: {"seq": int, "hash": str} of the DISPATCH entry
+    meta: dict | None = None  # ADDED: never hashed (TIME-7 wall-clock seconds); replays stay identical
 
 
 # --- ledger view (HANDOVER 18.5) -------------------------------------------------------------
