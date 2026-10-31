@@ -47,8 +47,11 @@ def _atc_text(k: ConstraintPacket) -> str:
     offers = ", ".join(o.value + (" (contested)" if (o.demand or 0) >= 3 else "") for o in k.options)
     sep = (_wake_text(hard["WAKE_SEPARATION"]) if "WAKE_SEPARATION" in hard
            else f"{hard.get('MIN_SEPARATION_MIN', '?')} min separation")
+    lead = hard.get("SLOT_LEAD")
+    lead_txt = (f", nothing before {lead.get('earliest_slot')} (commit {lead.get('commit_time')} + "
+                f"{lead.get('slot_lead_min')} min)" if isinstance(lead, dict) else "")
     return (f"Runway: {k.facts_owned.get('runway', 'n/a')}. I can offer {offers or 'no slots'}. "
-            f"Hard: these slots only, {sep}.")
+            f"Hard: these slots only, {sep}{lead_txt}.")
 
 
 def _pilot_text(k: ConstraintPacket) -> str:
@@ -64,7 +67,8 @@ def _ground_text(k: ConstraintPacket) -> str:
     listed = ", ".join(f"{g} " + ("unavailable" if v == "unavailable" else f"free {v}") for g, v in gates.items())
     notice = hard.get("GATE_CHANGE_NOTICE")
     notice_txt = (f"; a gate change needs {notice.get('min_notice_min')} min notice "
-                  f"(decided {notice.get('decision_time')})" if isinstance(notice, dict) else "")
+                  f"(from commit {notice.get('commit_time') or notice.get('decision_time')})"
+                  if isinstance(notice, dict) else "")
     soft = "; ".join(s.preference.lower() for s in k.soft) or "none"
     return (f"Gates: {listed or 'none'}. Hard: crew duty limit {hard.get('CREW_DUTY_LIMIT', '?')}"
             f"{notice_txt}. Soft: {soft}.")

@@ -9,6 +9,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from acacia.config import POLICY
+from acacia.constraints import time_budget_min
 from acacia.models import (
     AgentRole, ConstraintPacket, Decision, HardLimit, Option, ReasonCode, SoftPref, Stress, Verdict,
 )
@@ -242,7 +243,7 @@ def test_solver_never_breaks_declared_hard_limit(data) -> None:
         if limits["crew_end"] is not None:
             assert slot + taxi <= limits["crew_end"]
         if limits["decided"] is not None and c.package.gate != limits["assigned"]:
-            assert slot + taxi - limits["decided"] >= 20
+            assert slot + taxi - (limits["decided"] + time_budget_min()) >= 20  # from commit, TIME-4
         assert c.package.satisfies_hard
 
 
@@ -312,8 +313,9 @@ def _cand(r: SolveResult, slot: int, gate: str):
 
 
 def test_gate_change_notice_discards_late_gate_changes() -> None:
-    # decided 12:30 (750): A12 at slot 760 -> arrive 770, 20 min notice passes; 748 -> 758 fails
-    g = ground({"A7": 700, "A12": 700}, 900, 900, assigned="A7", decided=750)
+    # decided 12:25 + 5 min budget = commit 12:30 (750, TIME-4): A12 at slot 760 -> arrive 770,
+    # 20 min notice passes; 748 -> 758 fails
+    g = ground({"A7": 700, "A12": 700}, 900, 900, assigned="A7", decided=745)
     r = solve(packets(ground=g), TI, [], set())
     assert ReasonCode.GATE_CHANGE_NOTICE in _cand(r, 748, "A12").discard
     assert _cand(r, 760, "A12").discard == []

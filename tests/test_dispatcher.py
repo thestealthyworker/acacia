@@ -92,8 +92,9 @@ def test_e_queue_ranked_by_tier_then_impact(scenario_e) -> None:
         by_cluster.setdefault(it.cluster_id, []).append(
             (it.tier, -it.impact_score, to_min(it.decision_deadline), it.event_id))
     assert len(by_cluster) == 2 and all(keys == sorted(keys) for keys in by_cluster.values())
+    # TIME-8: clusters run in order of their earliest decision deadline (best member, then id, break ties)
     assert [it.cluster_id for it in q.items] == sorted(
-        (it.cluster_id for it in q.items), key=lambda c: min(by_cluster[c]))  # best member orders the clusters
+        (it.cluster_id for it in q.items), key=lambda c: (min(k[2] for k in by_cluster[c]), min(by_cluster[c]), c))
     assert all(it.status == "QUEUED" for it in q.items)
 
 
@@ -104,7 +105,7 @@ def test_e_shared_runway_window_clusters(scenario_e) -> None:
     assert {"DL201", "DL202", "DL203"} in members and {"DL204", "DL205"} in members
     assert all(any("shared runway window ATL" in r for r in c.payload["reasons"]) for c in clusters)
     first = clusters[0].payload["event_ids"][0]
-    assert first == _queue(entries).items[0].event_id  # clusters ordered by best member
+    assert first == _queue(entries).items[0].event_id  # CLUSTER entries follow the dispatch order (TIME-8)
 
 
 def test_e_assessments_show_downstream_chain(scenario_e) -> None:

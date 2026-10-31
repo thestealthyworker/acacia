@@ -9,6 +9,9 @@ the P_S2 target); crew utility = max(0, 1 - 1.5 x overtime / 60). `score_breakdo
 the informational keys `holding_fuel_kg` (when the Pilot declares `eta` and `burn_kg_per_h`) and
 `overtime_cost_min` (when Ground declares a G_S1 shift-end target); they are never part of the
 weighted score, which sums the POLICY keys only.
+
+TIME-3/4: a slot before the ATC's declared A_H3 SLOT_LEAD earliest slot is discarded SLOT_LEAD,
+and the G_H3 gate-change notice counts from the declared commit_time.
 """
 
 from __future__ import annotations
@@ -19,13 +22,13 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from acacia.config import POLICY
-from acacia.constraints import OVERTIME_COST_FACTOR, SPARE_HOLDING_MIN
+from acacia.constraints import OVERTIME_COST_FACTOR, SPARE_HOLDING_MIN, time_budget_min
 from acacia.models import (
     HHMM, AgentRole, ConstraintPacket, Decision, ReasonCode, ResolutionPackage, Stress, Verdict,
 )
 from acacia.timeutil import is_hhmm, to_hhmm, to_min
 
-SOLVER_VERSION = "solver-0.3"
+SOLVER_VERSION = "solver-0.4"
 FUEL_SPAN_MIN = SPARE_HOLDING_MIN  # FUEL-5: used when the Pilot declares no earliest landing
 CONNECTION_SPAN_MIN = 30
 OVERTIME_SPAN_MIN = 60
@@ -78,12 +81,13 @@ class _Decl:
     gate_free: dict[str, int | None]  # None = unavailable
     duty_limit: int | None
     crew_duty_end: int | None  # P_H2 FLIGHT_CREW_DUTY_END (gate arrival must not be later)
-    notice: tuple[int, int, str] | None  # G_H3 (min notice, decision time, assigned gate)
+    notice: tuple[int, int, str] | None  # G_H3 (min notice, commit time, assigned gate), TIME-4
     min_turn: int
     prefs: dict[str, tuple[str, str, object]]  # id -> (metric, owner role value, target)
     traffic: tuple[int, ...]
     eta: int | None = None  # Pilot fact "eta" (earliest landing E)
     burn_kg_per_h: float | None = None  # Pilot fact "burn_kg_per_h" (holding burn)
+    earliest_slot: int | None = None  # A_H3 SLOT_LEAD: commit time + slot lead (TIME-3)
 
 
 def package_key(slot: str, gate: str) -> str:
@@ -118,6 +122,7 @@ def _parse(packets: dict[AgentRole, ConstraintPacket]) -> _Decl:
         traffic=tuple(to_min(t) for t in (atc.facts_owned if atc else {}).get("traffic", [])),
         eta=_fact_time(pil, "eta"),
         burn_kg_per_h=_fact_number(pil, "burn_kg_per_h"),
+        earliest_slot=_earliest_slot(_hard(atc, "SLOT_LEAD")),
     )
 
 
@@ -133,24 +138,48 @@ def _fact_number(packet: ConstraintPacket | None, key: str) -> float | None:
     return float(value)
 
 
-def _notice(value: object) -> tuple[int, int, str] | None:
-    """Parse a declared G_H3 value; None when it is missing or malformed."""
-    if not isinstance(value, dict):
-        return None
-    decided, gate = value.get("decision_time"), value.get("assigned_gate")
+def _int(value: object) -> int | None:
     try:
-        need = int(value.get("min_notice_min"))  # type: ignore[arg-type]
+        return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    if not is_hhmm(decided) or not isinstance(gate, str):
+
+
+def _notice(value: object) -> tuple[int, int, str] | None:
+    """Parse a declared G_H3 value into (min notice, commit time, assigned gate); None when it is
+    missing or malformed. Notice counts from the declared commit_time (TIME-4); a packet that only
+    declares decision_time gets the public negotiation + sign-off budget added."""
+    if not isinstance(value, dict):
         return None
-    return need, to_min(decided), gate
+    decided, commit, gate = value.get("decision_time"), value.get("commit_time"), value.get("assigned_gate")
+    need = _int(value.get("min_notice_min"))
+    if need is None or not isinstance(gate, str):
+        return None
+    if is_hhmm(commit):
+        return need, to_min(commit), gate
+    if is_hhmm(decided):
+        return need, to_min(decided) + time_budget_min(), gate
+    return None
+
+
+def _earliest_slot(value: object) -> int | None:
+    """Parse a declared A_H3 SLOT_LEAD value: earliest_slot, else commit_time + slot_lead_min."""
+    if not isinstance(value, dict):
+        return None
+    earliest, commit, lead = value.get("earliest_slot"), value.get("commit_time"), _int(value.get("slot_lead_min"))
+    if is_hhmm(earliest):
+        return to_min(earliest)
+    if is_hhmm(commit) and lead is not None:
+        return to_min(commit) + lead
+    return None
 
 
 # --- steps 2 and 3: hard filter and utilities -------------------------------------------------
 def _discard(d: _Decl, slot: int, gate: str, taxi_in: int) -> list[ReasonCode]:
     why: list[ReasonCode] = []
     gate_arr = slot + taxi_in
+    if d.earliest_slot is not None and slot < d.earliest_slot:
+        why.append(ReasonCode.SLOT_LEAD)
     if d.land_by is not None and slot > d.land_by:
         why.append(ReasonCode.FUEL_LIMIT)
     if gate in d.gate_free:  # a declared free time binds every gate, remote stands too
@@ -161,8 +190,8 @@ def _discard(d: _Decl, slot: int, gate: str, taxi_in: int) -> list[ReasonCode]:
     if crew_late or (d.duty_limit is not None and gate_arr + d.min_turn > d.duty_limit):
         why.append(ReasonCode.CREW_DUTY)
     if d.notice is not None:
-        need, decided, assigned = d.notice
-        if gate != assigned and gate_arr - decided < need:
+        need, committed, assigned = d.notice
+        if gate != assigned and gate_arr - committed < need:
             why.append(ReasonCode.GATE_CHANGE_NOTICE)
     return why
 
@@ -245,7 +274,7 @@ def _cut_hit(cut: Cut, slot: int, gate: str, utils: dict[str, float]) -> bool:
     return cut.slot is not None and slot == to_min(cut.slot) and gate == cut.gate
 
 
-_HARD_CUT_KIND = {"A_H1": "SLOT", "G_H1": "GATE", "P_H1": "SLOT_FROM", "G_H2": "SLOT_FROM",
+_HARD_CUT_KIND = {"A_H1": "SLOT", "A_H3": "SLOT", "G_H1": "GATE", "P_H1": "SLOT_FROM", "G_H2": "SLOT_FROM",
                   "P_H2": "SLOT_FROM", "G_H3": "GATE"}  # other hard ids cut the exact package
 
 

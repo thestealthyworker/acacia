@@ -210,7 +210,7 @@ def test_audit_flags_missing_ground_limits(event) -> None:
 def test_audit_flags_legacy_flat_separation(event) -> None:
     legacy = _complete(event, AgentRole.ATC)
     legacy = legacy.model_copy(update={"hard": [legacy.hard[0], HardLimit(id="A_H2", rule="MIN_SEPARATION_MIN",
-                                                                          value=3)]})
+                                                                          value=3), *legacy.hard[2:]]})
     [note] = audit_declaration(AgentRole.ATC, legacy, ATC, event)
     assert note["id"] == "A_H2" and note["rule"] == "WAKE_SEPARATION" and "MIN_SEPARATION_MIN" in note["text"]
 
@@ -231,11 +231,12 @@ def test_decision_time_payload_then_injected_start_then_eta_minus_30(event) -> N
 
 
 def test_ground_gate_change_notice_declared_and_computed(event) -> None:
-    short = event.model_copy(update={"decision_time": "12:40"})  # gate arrival 12:50 -> 10 min notice
+    short = event.model_copy(update={"decision_time": "12:35"})  # commit 12:40; gate arrival 12:50 -> 10 min
     packet = _complete(short, AgentRole.GROUND)
     g_h3 = next(h for h in packet.hard if h.id == "G_H3")
     assert g_h3.rule == "GATE_CHANGE_NOTICE"
-    assert g_h3.value == {"min_notice_min": 20, "decision_time": "12:40", "assigned_gate": "A7"}
+    assert g_h3.value == {"min_notice_min": 20, "decision_time": "12:35", "commit_time": "12:40",
+                          "assigned_gate": "A7"}
     reject = {"event_id": event.event_id, "package_id": "P1", "agent": "GROUND", "turn": 2,
               "verdict": "REJECT", "reason_code": "GATE_CHANGE_NOTICE", "cites": "G_H3",
               "rationale": "Only 10 min notice for a move off A7."}

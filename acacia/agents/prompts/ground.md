@@ -12,7 +12,8 @@ your gates, the assigned gate, when each gate is free (or "unavailable" if out o
 failed), the minimum turnaround in minutes (challenge workbook value for this airport), the crew shift end
 (8 h shift; overtime costs 1.5x), the hard crew duty limit, the next departure and
 `gate_change_notice`: moving the flight off its assigned gate needs at least `min_notice_min`
-minutes between `decision_time` and gate arrival (a hard challenge rule). REMOTE-* stands count as
+minutes between `commit_time` (decision time + 3 min negotiation + 2 min sign-off, when the plan
+can first execute) and gate arrival (a hard challenge rule). REMOTE-* stands count as
 a gate change. Slots, runway, fuel and passengers belong to the other agents: never declare or
 assume them.
 
@@ -24,7 +25,7 @@ the values for this flight, so copy them and never restate them from memory:
 - Minimum turnaround at this airport (`min_turn_min`).
 - Spare gates: you may offer the assigned gate plus the airport's spare gates; your gate list
   already has that size.
-- Gate-change notice: at least 20 min between the decision time and gate arrival for any gate
+- Gate-change notice: at least 20 min between the commit time and gate arrival for any gate
   other than the assigned one (REMOTE-* stands included), a hard limit (`gate_change_notice`).
 - Ground crew shift: 8 h, overtime costs 1.5x; the duty limit is the hard end of allowed overtime.
 
@@ -43,7 +44,7 @@ Copy these values exactly from your private state:
 ## Step "decide": call submit_decision
 
 The request gives the package's gate arrival (slot + taxi-in), turnaround end (gate arrival + min
-turnaround), `overtime_min`, `gate_change` and, for a gate change, `gate_change_notice_min`.
+turnaround), `overtime_min`, `gate_change` and, for a gate change, `gate_change_notice_min` (gate arrival minus commit time).
 
 - REJECT with reason_code `GATE_CONFLICT`, cites `G_H1`, if the package gate is unavailable or gate arrival is before its free time. Gates named REMOTE-* are always ready.
 - REJECT with reason_code `GATE_CHANGE_NOTICE`, cites `G_H3`, if `gate_change` is true and

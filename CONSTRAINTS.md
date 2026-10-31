@@ -56,7 +56,8 @@ No other module reads the CSVs or hard-codes these numbers.
 - **Gate options [CHALLENGE spare_gates_at_any_time].** Ground offers the assigned gate plus up to `spare_gates` other gates (ATL: 3 spare, so 4 options). They are picked from the world's gate pool by earliest `gate_free_from(..., duration=min_turn)`. The world keeps a modelled pool of 8 gates per airport. That is a subset of the workbook's `gates` (ATL 150): ASSUMED, stated as a deviation.
 - **Gate-change notice (HARD) [CHALLENGE fuel_and_crew].** "At least 20 minutes before arrival." If the package's gate differs from the assigned gate, then `gate_arrival - decision_time >= 20`, where `gate_arrival = slot + taxi_in`.
   - `DisruptionEvent.decision_time` ("HH:MM", ADDED). The trigger payload may set it. Default: the start of the earliest injected event, or `E - 30` if there is none. ASSUMED: the negotiation runs when the disruption is first known.
-  - Ground declares hard limit `G_H3 GATE_CHANGE_NOTICE` with value `{"min_notice_min": 20, "decision_time": "HH:MM", "assigned_gate": ...}`.
+  - Ground declares hard limit `G_H3 GATE_CHANGE_NOTICE` with value `{"min_notice_min": 20, "decision_time": "HH:MM", "commit_time": "HH:MM", "assigned_gate": ...}`.
+  - **Time budget (TIME-1..4).** The notice counts from `commit_time = decision_time + 3 (negotiation) + 2 (sign-off)`, not from `decision_time`, and every landing slot must be at or after `commit_time + 5` (ATC hard limit `A_H3 SLOT_LEAD`, checker rule `SLOT_LEAD`).
   - The solver discards a violating package with reason `GATE_CHANGE_NOTICE`.
   - Add `ReasonCode.GATE_CHANGE_NOTICE` (ADDED). Ground may REJECT with it, citing `G_H3`.
   - New checker rule `GATE_CHANGE_NOTICE`. A `REMOTE-*` stand counts as a gate change too, so it needs the same notice.
@@ -130,5 +131,13 @@ Contracts other than the ADDED fields above; the state machine; turn limits; che
 | PLAY-3 | Fallback logs why | as given | reason string in FallbackPlan and log | AS_GIVEN |
 | KIT-1 | Private state | n/a | slots, pax, gates and crew shift simulated with a fixed seed | ASSUMED (labelled simulated) |
 | KIT-2 | MCT | n/a | 35 min | ASSUMED |
+| TIME-1 | Negotiation time budget | n/a | 3 min simulated (3 turns x 1 min) | ASSUMED |
+| TIME-2 | Human sign-off time | n/a | 2 min; commit = decision + 3 + 2 | ASSUMED |
+| TIME-3 | Slot lead after commit | n/a | slots at or after commit + 5 min | ASSUMED |
+| TIME-4 | Gate-change notice reference | before arrival | counted from the commit time | ASSUMED |
+| TIME-5 | Deadline guard | n/a | E - decision < 5 min: straight to the checked fallback | ASSUMED |
+| TIME-6 | Shared clock across triggers | n/a | decision time >= previous dispatched commit time | ASSUMED |
+| TIME-7 | Live wall-clock overshoot | n/a | LLM run over 3 min real time falls back; wall time not hashed | ASSUMED |
+| TIME-8 | Dispatch order across clusters | clusters by best-ranked member (HANDOVER 18.6) | tier first, then clusters by earliest decision deadline, rank inside a cluster | CHANGED (shared clock makes time order matter) |
 
 Add a row for any further deviation introduced while building.

@@ -1,6 +1,7 @@
 """Coordinator: the single-event negotiation state machine (HANDOVER 11, PLAN 3.1).
 
 IDLE -> TRIANGULATED -> DECLARING -> SOLVING -> CHECKING -> COMMITTED | FALLBACK -> AWAITING_SIGNOFF
+(TRIANGULATED -> FALLBACK directly when E - decision time is under the time budget, TIME-5)
 
 Turn 1 is declare; entering SOLVING sets turn 2; a reject at turn 2 sets turn 3; a reject at
 turn 3 goes to FALLBACK, so at most two packages are voted on. Agents only declare and vote.
@@ -19,6 +20,7 @@ import pandas as pd
 from acacia import config, constraints
 from acacia import coordinator_text as txt
 from acacia.agents.base import Agent, AgentTimeout, private_for
+from acacia.coordinator_clock import Clock, WallClock, budget_text, deadline_reason, enforces_wall_budget
 from acacia.coordinator_outcome import (
     build_record, compute_fallback, fallback_text, make_stamp, record_text, safe_check,
 )
@@ -58,7 +60,7 @@ class _Run:
 
     def __init__(self, event: DisruptionEvent, stress: Stress, agents: dict[AgentRole, Agent],
                  view: LedgerView, live: LedgerView, world: AirportWorld, airports: pd.DataFrame,
-                 should_yield: Callable[[], bool] | None) -> None:
+                 should_yield: Callable[[], bool] | None, clock: Clock | None = None) -> None:
         self.event, self.stress, self.agents = event, stress, agents
         self.view, self.live, self.world, self.airports = view, live, world, airports
         self.should_yield = should_yield
@@ -76,6 +78,7 @@ class _Run:
         self.preempted = False
         self.fallback_reason: str | None = None
         self.atc_error: str | None = None
+        self.wall = WallClock(enforces_wall_budget(agents), clock)
 
     def emit(self, who: str, type_: str, text: str, **kw) -> LogEntry:
         return self.log.append(who, type_, text, **kw)
@@ -100,6 +103,14 @@ class _Run:
             f"{ev.causes.late_aircraft} late aircraft, {ev.causes.air_system} air system. Classified "
             f"{ev.scenario_type.value}. Injected (simulated): {inj or 'none'}. Earliest landing "
             f"{ev.eta_landing}."), stage=0, turn=0, payload=ev.model_dump(mode="json"))
+
+    def stage_no_time(self, reason: str) -> Iterator[LogEntry]:
+        """Deadline guard (TIME-5): E is too close to negotiate, so the checked fallback decides."""
+        self.turn = 0
+        self.private = build_private(self.event, self.stress, self.world, self.view)
+        yield self._to_fallback("DEADLINE", reason, "Deadline guard: the negotiation and sign-off budget "
+                                "does not fit before the earliest landing, so no agent is asked. Guard: "
+                                "`TRIANGULATED` goes straight to `FALLBACK`; the checker still runs on the plan.")
 
     def stage_declare(self) -> Iterator[LogEntry]:
         self.turn = 1
@@ -164,6 +175,7 @@ class _Run:
         duty = to_hhmm(gate_arr + turn)
         notice = {"min_notice_min": constraints.GATE_CHANGE_NOTICE_MIN,
                   "decision_time": to_hhmm(constraints.decision_time_min(ev)),
+                  "commit_time": to_hhmm(constraints.commit_time_min(ev)),
                   "assigned_gate": UNKNOWN_ASSIGNED_GATE}
         hard = [HardLimit(id="G_H1", rule="GATE_FREE_FROM", value={DEFAULT_REMOTE: to_hhmm(gate_arr)}),
                 HardLimit(id="G_H2", rule="CREW_DUTY_LIMIT", value=duty),
@@ -191,6 +203,9 @@ class _Run:
             return
         self.turn = FIRST_VOTE_TURN
         while self.outcome is None:
+            if (late := self.wall.overshoot_reason()) is not None:
+                yield self._to_fallback("TIME_BUDGET", late, "Live negotiation is over its wall-clock budget.")
+                return
             yield from self._one_turn()
             if self.outcome is None and (yield from self._maybe_preempt()):
                 return
@@ -202,7 +217,8 @@ class _Run:
         yield self.coord("STATE", f"Pre-empted after turn {self.turn}: a higher-priority trigger needs "
                          "the airport. The current turn finished; this run stops here and is re-queued. "
                          "Nothing is committed.", "PREEMPTED", None,
-                         payload={"event_id": self.event.event_id, "turn": self.turn, "reason": "should_yield"})
+                         payload={"event_id": self.event.event_id, "turn": self.turn, "reason": "should_yield"},
+                         meta=self.wall.meta())
         return True
 
     def _one_turn(self) -> Iterator[LogEntry]:
@@ -283,6 +299,11 @@ class _Run:
         return safe_check(pkg, self.event, self.private, self.world, self.live)
 
     def _resolve_turn(self, top: ResolutionPackage, rejects: list[Decision], check: CheckResult) -> Iterator[LogEntry]:
+        late = self.wall.overshoot_reason()
+        if late is not None:
+            yield self._to_fallback("TIME_BUDGET", late, "Live negotiation is over its wall-clock budget, so "
+                                    "this package is not committed.")
+            return
         if not rejects and check.passed:
             self.outcome, self.final = "CONSENSUS", top
             yield self.coord("STATE", "All three ACCEPT and the checker passes. Guard satisfied: `CHECKING` "
@@ -325,14 +346,15 @@ class _Run:
         stamp = make_stamp(self.agents)
         record = build_record(self.event, self.outcome or "FALLBACK", self.final, plan, self.turn,
                               self.decisions, stamp, why=self.fallback_reason if used else None)
-        yield self.coord("ConsensusRecord", record_text(record, self.event), "AWAITING_SIGNOFF", 5,
-                         payload=record.model_dump(mode="json"))
+        yield self.coord("ConsensusRecord", record_text(record, self.event) + budget_text(self.event),
+                         "AWAITING_SIGNOFF", 5, payload=record.model_dump(mode="json"), meta=self.wall.meta())
 
 
 def run(event: DisruptionEvent, stress: Stress | None, agents: dict[AgentRole, Agent],
         ledger_view: LedgerView | None = None, should_yield: Callable[[], bool] | None = None, *,
         data: object | None = None, ledger_live: LedgerView | None = None,
-        world: AirportWorld | None = None, dispatched_by: dict | None = None) -> Iterator[LogEntry]:
+        world: AirportWorld | None = None, dispatched_by: dict | None = None,
+        clock: Clock | None = None) -> Iterator[LogEntry]:
     """Negotiate one event; yields LogEntry objects. The last entry's payload is the ConsensusRecord.
 
     `ledger_view` is the read-only snapshot the agents' private state is built from; the
@@ -340,7 +362,9 @@ def run(event: DisruptionEvent, stress: Stress | None, agents: dict[AgentRole, A
     polled between turns: when it returns True the current turn is finished, a PREEMPTED
     STATE entry is emitted and the generator stops (no ConsensusRecord). `data` is a DataStore
     (its airports table drives the divert); `dispatched_by` is {"seq", "hash"} of the DISPATCH
-    entry and is written into the first entry.
+    entry and is written into the first entry. `clock` (seconds, default time.monotonic) measures
+    the real run time, logged only in the final entry's non-hashed `meta` (TIME-7). An event whose
+    earliest landing is too close to its decision time skips negotiation (TIME-5).
     """
     view = ledger_view if ledger_view is not None else EmptyLedgerView()
     live = ledger_live if ledger_live is not None else view
@@ -348,8 +372,13 @@ def run(event: DisruptionEvent, stress: Stress | None, agents: dict[AgentRole, A
     airports = getattr(data, "airports", None)
     if not isinstance(airports, pd.DataFrame) or airports.empty:
         airports = _default_airports()
-    r = _Run(event, stress or Stress(), agents, view, live, world, airports, should_yield)
+    r = _Run(event, stress or Stress(), agents, view, live, world, airports, should_yield, clock)
     yield from r.stage_start(dispatched_by)
+    no_time = deadline_reason(event)
+    if no_time is not None:
+        yield from r.stage_no_time(no_time)
+        yield from r.stage_outcome()
+        return
     yield from r.stage_declare()
     yield from r.stage_negotiate()
     if r.preempted:

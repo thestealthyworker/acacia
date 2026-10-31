@@ -2,7 +2,8 @@
 
 Each entry's hash is sha256(prev_hash + canonical_json({seq, who, type, payload})), starting
 from "GENESIS". Timestamps, text and state are not hashed (so two identical runs give the
-same chain); everything that matters for audit goes in the payload. One JSONL file per event
+same chain); everything that matters for audit goes in the payload. `meta` (wall-clock
+timings, TIME-7) is not hashed either, so a live run's real duration never breaks a replay. One JSONL file per event
 in runs/; `verify_chain` re-computes the chain and names the first bad entry.
 """
 
@@ -68,14 +69,14 @@ class LogChain:
 
     def append(self, who: str, type_: str, text: str, *, state: str | None = None,
                stage: int | None = None, turn: int | None = None, payload: dict | None = None,
-               dispatched_by: dict | None = None) -> LogEntry:
+               dispatched_by: dict | None = None, meta: dict | None = None) -> LogEntry:
         seq = len(self._entries) + 1
         body = _jsonable(payload)
         prev = self.head
         entry = LogEntry(
             seq=seq, ts=now_ts(), who=who, type=type_, state=state, stage=stage, turn=turn,
             text=text, payload=body, prev_hash=prev, hash=entry_hash(prev, seq, who, type_, body),
-            event_id=self.event_id, dispatched_by=dispatched_by,
+            event_id=self.event_id, dispatched_by=dispatched_by, meta=meta,
         )
         self._entries.append(entry)
         return entry

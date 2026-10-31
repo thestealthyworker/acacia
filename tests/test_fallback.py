@@ -8,7 +8,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from acacia.constraints import decision_time_min
+from acacia.constraints import commit_time_min, earliest_slot_min
 from acacia.fallback import haversine_mi, nearest_alternate, plan_fallback
 from acacia.models import AtcPrivate, FallbackPlan, GroundPrivate, PilotPrivate, PrivateState
 from acacia.timeutil import to_min
@@ -104,40 +104,41 @@ def test_fallback_property(event, airports, slots, land_by, free, failed) -> Non
     plan = plan_fallback(event, p, airports)
     assert isinstance(plan, FallbackPlan)
     assert plan.reason  # CONSTRAINTS.md 6: the fallback always says why
-    if not slots or min(slots) > land_by:
+    usable = [s for s in slots if s >= earliest_slot_min(event)]  # TIME-3: commit time + 5
+    if not usable or min(usable) > land_by:
         assert plan.divert
         return
     slot = to_min(plan.slot)
-    assert not plan.divert and slot in slots and slot <= max(min(slots), land_by)
+    assert not plan.divert and slot in usable and slot <= max(min(usable), land_by)
     assert plan.gate not in failed
     if plan.gate != "REMOTE-1":
         assert free[plan.gate] is not None and free[plan.gate] <= slot + event.taxi_in
-    notice = slot + event.taxi_in - decision_time_min(event)
+    notice = slot + event.taxi_in - commit_time_min(event)  # TIME-4
     assigned = next(iter(free))
     if "no gate meets" not in plan.reason:
         assert plan.gate == assigned or notice >= 20  # CONSTRAINTS.md 3, hard
-    if slot != min(slots):  # a later slot is only taken to meet the gate-change notice
-        assert min(slots) + event.taxi_in - decision_time_min(event) < 20
+    if slot != min(usable):  # a later slot is only taken to meet the gate-change notice
+        assert min(usable) + event.taxi_in - commit_time_min(event) < 20
 
 
 def test_gate_change_needs_twenty_minutes_notice(event, airports) -> None:
-    # decided 12:01 (721, earliest injected start); slot 12:20 -> arrive 12:30, 29 min notice
-    late = event.model_copy(update={"decision_time": "12:15"})  # 735: 12:30 gives 15 min
+    # notice counts from the commit time (TIME-4): decided 12:10 -> commit 12:15 (735)
+    late = event.model_copy(update={"decision_time": "12:10"})  # arrive 12:30 gives 15 min
     p = _private(free_slots=(740, 748), free_from={"A7": 761, "A10": 701, "A12": 745})
     plan = plan_fallback(late, p, airports)
     # 12:20 only allows the assigned gate A7 (free 12:41, too late), so 12:28 (arrive 12:38,
-    # 23 min notice) is taken with the earliest free gate A10
+    # 23 min after commit) is taken with the earliest free gate A10
     assert (plan.slot, plan.gate) == ("12:28", "A10") and "gate-change notice" in plan.reason
 
 
 def test_assigned_gate_needs_no_notice(event, airports) -> None:
-    late = event.model_copy(update={"decision_time": "12:25"})
+    late = event.model_copy(update={"decision_time": "12:10"})  # commit 12:15: 15 min notice
     p = _private(free_slots=(740,), free_from={"A7": 701, "A10": 700})
     assert plan_fallback(late, p, airports).gate == "A7"
 
 
 def test_no_gate_meets_notice_keeps_earliest_slot_and_says_why(event, airports) -> None:
-    late = event.model_copy(update={"decision_time": "12:25"})  # 745: arrive 12:30 is 5 min
+    late = event.model_copy(update={"decision_time": "12:10"})  # commit 12:15: arrive 12:30 is 15 min
     p = _private(free_slots=(740,), free_from={"A7": 761, "A10": 701})
     plan = plan_fallback(late, p, airports)
     assert plan.slot == "12:20" and not plan.divert and "no gate meets" in plan.reason
@@ -186,10 +187,10 @@ def test_assigned_gate_is_preferred_when_clear(event, airports) -> None:
 
 
 def test_gate_change_with_exactly_twenty_minutes_notice_is_allowed(event, airports) -> None:
-    timed = event.model_copy(update={"decision_time": "12:10"})  # arrive 12:30: exactly 20 min
+    timed = event.model_copy(update={"decision_time": "12:05"})  # commit 12:10, arrive 12:30: exactly 20
     plan = plan_fallback(timed, _private(free_slots=(740,)), airports)
-    assert (plan.slot, plan.gate) == ("12:20", "A10")
-    tight = event.model_copy(update={"decision_time": "12:11"})  # 19 min: only A7 (busy) qualifies
+    assert (plan.slot, plan.gate) == ("12:20", "A10") and "no gate meets" not in plan.reason
+    tight = event.model_copy(update={"decision_time": "12:06"})  # 19 min: only A7 (busy) qualifies
     assert plan_fallback(tight, _private(free_slots=(740, 748)), airports).slot == "12:28"
 
 

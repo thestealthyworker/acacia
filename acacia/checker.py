@@ -7,7 +7,8 @@ at check time (never the snapshot the agents saw). A package is safe only if eve
 passes; each rule returns pass plus a one-line detail string.
 
 Workbook limits come from `acacia.constraints`: wake separation by leader/follower class at
-140 kt (replacing the flat 3 min) and the hard 20 min gate-change notice. SEPARATION checks the
+140 kt (replacing the flat 3 min) and the hard 20 min gate-change notice, counted from the
+commit time (TIME-4). SLOT_LEAD re-derives commit time + 5 min from the event (TIME-3). SEPARATION checks the
 ATC's traffic snapshot and then `world.is_separated` against the world's traffic plus the live
 ledger (other events' held or committed slots), so a slot booked nearby after ATC declared fails.
 """
@@ -23,7 +24,7 @@ from acacia.models import (
 from acacia.timeutil import is_hhmm, to_hhmm, to_min
 from acacia.world import OTHER_EVENT_CLASS, AirportWorld, held_slot_class, separation_reach
 
-CHECKER_VERSION = "checker-0.4"
+CHECKER_VERSION = "checker-0.5"
 REMOTE_PREFIX = "REMOTE"
 
 
@@ -197,17 +198,30 @@ decision_time_min = constraints.decision_time_min  # shared default (CONSTRAINTS
 
 def check_gate_change_notice(slot: int, gate: str, event: DisruptionEvent,
                              private: PrivateState) -> RuleResult:
-    """A gate other than the assigned one (REMOTE-* included) needs >= 20 min notice."""
+    """A gate other than the assigned one (REMOTE-* included) needs >= 20 min notice, counted from
+    the commit time (TIME-4): decision time + negotiation + sign-off budget."""
     assigned = private.ground.assigned_gate
     if gate == assigned:
         return _result(ReasonCode.GATE_CHANGE_NOTICE, True, f"{gate} is the assigned gate; no change.")
-    decided, arrival = decision_time_min(event), slot + event.taxi_in
-    notice, need = arrival - decided, constraints.GATE_CHANGE_NOTICE_MIN
+    commit, arrival = constraints.commit_time_min(event), slot + event.taxi_in
+    notice, need = arrival - commit, constraints.GATE_CHANGE_NOTICE_MIN
     passed = notice >= need
     sign = ">=" if passed else "<"
     return _result(ReasonCode.GATE_CHANGE_NOTICE, passed,
                    f"gate change {assigned} -> {gate}: notice {notice} min {sign} {need} min "
-                   f"(decided {to_hhmm(decided)}, gate arrival {to_hhmm(arrival)}).")
+                   f"(commit {to_hhmm(commit)}, decided {to_hhmm(decision_time_min(event))}, "
+                   f"gate arrival {to_hhmm(arrival)}).")
+
+
+def check_slot_lead(slot: int, event: DisruptionEvent) -> RuleResult:
+    """The slot is at or after commit time + SLOT_LEAD_MIN (TIME-3), so it is not past when approved."""
+    commit = constraints.commit_time_min(event)
+    earliest = commit + constraints.SLOT_LEAD_MIN
+    passed = slot >= earliest
+    sign = ">=" if passed else "<"
+    return _result(ReasonCode.SLOT_LEAD, passed,
+                   f"slot {to_hhmm(slot)} {sign} commit {to_hhmm(commit)} + {constraints.SLOT_LEAD_MIN} min "
+                   f"lead ({to_hhmm(earliest)}).")
 
 
 def check(package: ResolutionPackage, event: DisruptionEvent, private: PrivateState,
@@ -226,6 +240,7 @@ def check(package: ResolutionPackage, event: DisruptionEvent, private: PrivateSt
         check_crew(slot, event, private),
         check_resources(slot, gate, event, private, ledger_live, airport),
         check_gate_change_notice(slot, gate, event, private),
+        check_slot_lead(slot, event),
     ]
     return CheckResult(event_id=event.event_id, package_id=package.package_id,
                        passed=all(r.passed for r in rules), rules=rules)

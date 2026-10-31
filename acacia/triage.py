@@ -1,5 +1,8 @@
 """Triage (FABLE_ADDENDUM 6, HANDOVER 18.4): knock-on propagation, impact score, safety tier,
 priority order and clusters. Pure functions over the ImpactGraph; no LLM, no simulation.
+`dispatch_order` orders clusters by earliest decision deadline (TIME-8), because the dispatcher's
+shared simulated clock (TIME-6) makes time order matter; `cluster` itself still lists clusters by
+best member (FABLE_ADDENDUM 6).
 
 `land_by` and `first_slot` are inputs (the dispatcher gets them from the simulator).
 """
@@ -122,9 +125,30 @@ def assess(
     )
 
 
-def rank(assessments: list[ImpactAssessment]) -> list[ImpactAssessment]:
+def rank_key(a: ImpactAssessment) -> tuple:
     """(tier asc, impact desc, decision deadline asc, event_id asc). Safety is a gate, not a weight."""
-    return sorted(assessments, key=lambda a: (a.tier, -a.impact_score, to_min(a.decision_deadline), a.event_id))
+    return (a.tier, -a.impact_score, to_min(a.decision_deadline), a.event_id)
+
+
+def rank(assessments: list[ImpactAssessment]) -> list[ImpactAssessment]:
+    return sorted(assessments, key=rank_key)
+
+
+def _cluster_deadline_key(c: Cluster, by_id: dict[str, ImpactAssessment]) -> tuple:
+    members = [by_id[e] for e in c.event_ids]
+    return (min(to_min(a.decision_deadline) for a in members), min(rank_key(a) for a in members), c.cluster_id)
+
+
+def deadline_cluster_order(clusters: list[Cluster], by_id: dict[str, ImpactAssessment]) -> list[Cluster]:
+    """TIME-8: clusters by earliest member decision deadline, then best member rank, then cluster_id."""
+    return sorted(clusters, key=lambda c: _cluster_deadline_key(c, by_id))
+
+
+def dispatch_order(clusters: list[Cluster], by_id: dict[str, ImpactAssessment]) -> list[str]:
+    """TIME-8 dispatch order: safety tier first (tier 0 jumps every cluster), then clusters in
+    deadline order, then the rank key inside a cluster. Events in no cluster sort as cluster 0."""
+    idx = {eid: i for i, c in enumerate(deadline_cluster_order(clusters, by_id)) for eid in c.event_ids}
+    return sorted(by_id, key=lambda e: (by_id[e].tier, idx.get(e, 0), rank_key(by_id[e])))
 
 
 # --- clusters ---------------------------------------------------------------------------------------

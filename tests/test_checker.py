@@ -84,10 +84,11 @@ def _run(event, private, slot, gate="A7", world=None, ledger=EMPTY):
 # --- clean pass ---------------------------------------------------------------------------
 def test_clean_package_passes_every_rule(event) -> None:
     result = _run(event, _private(), 740)
-    assert result.passed and len(result.rules) == 6 and result.failed() == []
+    assert result.passed and len(result.rules) == 7 and result.failed() == []
     assert {r.rule for r in result.rules} == {
         ReasonCode.SEPARATION, ReasonCode.FUEL_LIMIT, ReasonCode.GATE_CONFLICT,
-        ReasonCode.CREW_DUTY, ReasonCode.RESOURCE_CONFLICT, ReasonCode.GATE_CHANGE_NOTICE}
+        ReasonCode.CREW_DUTY, ReasonCode.RESOURCE_CONFLICT, ReasonCode.GATE_CHANGE_NOTICE,
+        ReasonCode.SLOT_LEAD}  # TIME-3: slot at or after commit time + 5
     assert all(r.detail for r in result.rules)
 
 
@@ -286,19 +287,19 @@ def test_assigned_gate_needs_no_notice(event) -> None:
 
 
 def test_gate_change_with_exactly_twenty_minutes_notice_passes(event) -> None:
-    timed = event.model_copy(update={"decision_time": "12:10"})  # gate arrival 12:30
+    timed = event.model_copy(update={"decision_time": "12:05"})  # commit 12:10, gate arrival 12:30
     assert _rule(_run(timed, _private(), 740, gate="A10"), ReasonCode.GATE_CHANGE_NOTICE).passed
 
 
 def test_gate_change_with_nineteen_minutes_notice_fails(event) -> None:
-    timed = event.model_copy(update={"decision_time": "12:11"})
+    timed = event.model_copy(update={"decision_time": "12:06"})  # commit 12:11 (TIME-4)
     result = _run(timed, _private(), 740, gate="A10")
     rule = _rule(result, ReasonCode.GATE_CHANGE_NOTICE)
     assert not rule.passed and not result.passed and "19 min" in rule.detail
 
 
 def test_remote_stand_counts_as_a_gate_change(event) -> None:
-    timed = event.model_copy(update={"decision_time": "12:11"})
+    timed = event.model_copy(update={"decision_time": "12:06"})  # commit 12:11: 19 min
     rule = _rule(_run(timed, _private(), 740, gate="REMOTE-1"), ReasonCode.GATE_CHANGE_NOTICE)
     assert not rule.passed
 
