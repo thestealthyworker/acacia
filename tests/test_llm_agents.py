@@ -226,7 +226,8 @@ def test_wake_value_uses_workbook_minutes_at_140_kt() -> None:
 def test_decision_time_payload_then_injected_start_then_eta_minus_30(event) -> None:
     assert decision_time_min(event) == 12 * 60 + 1  # earliest injected start 12:01
     assert decision_time_min(event.model_copy(update={"decision_time": "11:30"})) == 11 * 60 + 30
-    assert decision_time_min(event.model_copy(update={"injected": []})) == 12 * 60 + 11 - 30
+    bare = event.model_copy(update={"injected": [], "decision_time": None})
+    assert decision_time_min(bare) == 12 * 60 + 11 - 30
 
 
 def test_ground_gate_change_notice_declared_and_computed(event) -> None:
@@ -329,3 +330,29 @@ def test_real_sdk_client_over_mock_transport(event) -> None:
                                  http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
     assert LLMAgent(AgentRole.PILOT, client=client, model="claude-haiku-5-5").declare(event, PILOT) == packet
     assert "temperature" not in seen["body"] and seen["body"]["tool_choice"]["name"] == DECLARE_TOOL
+
+
+
+def test_audit_flags_missing_or_wrong_pilot_eta_fact(event) -> None:
+    packet = _complete(event, AgentRole.PILOT)
+    assert packet.facts_owned["eta"] == event.eta_landing
+    no_eta = packet.model_copy(update={"facts_owned": {"connecting_pax": 38}})
+    [note] = audit_declaration(AgentRole.PILOT, no_eta, PILOT, event)
+    assert note["id"] == "eta" and note["expected"] == event.eta_landing
+    wrong = packet.model_copy(update={"facts_owned": {**packet.facts_owned, "eta": "12:30"}})
+    assert [n["id"] for n in audit_declaration(AgentRole.PILOT, wrong, PILOT, event)] == ["eta"]
+    assert audit_declaration(AgentRole.PILOT, no_eta, PILOT) == []  # no event: eta not audited
+
+
+def test_private_views_carry_the_workbook_facts_the_prompts_ask_for(event) -> None:
+    """Validator G3: pilot.md says declare burn_kg_per_h only if the private state gives it, and
+    Ground declares spare_gates and shift_start; the LLM views must therefore carry them."""
+    from acacia.agents.llm import private_view
+
+    pilot = PILOT.model_copy(update={"wake_class": "Heavy", "burn_kg_per_h": 6500})
+    pv = private_view(AgentRole.PILOT, pilot, event)
+    assert pv["wake_class"] == "Heavy" and pv["burn_kg_per_h"] == 6500
+    ground = GROUND.model_copy(update={"spare_gates": 3, "shift_start": 336})
+    gv = private_view(AgentRole.GROUND, ground, event)
+    assert gv["spare_gates"] == 3 and gv["shift_start"] == "05:36"
+    assert private_view(AgentRole.GROUND, GROUND, event)["shift_start"] is None

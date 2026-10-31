@@ -74,7 +74,7 @@ def triangulate(row: Row) -> DisruptionEvent:
         security=num(row, "SECURITY_DELAY"),
     )
     event_id = make_event_id(flight.airline, flight.flight_no, flight.date, flight.origin, flight.dest)
-    return DisruptionEvent(
+    event = DisruptionEvent(
         event_id=event_id,
         scenario_type=classify(causes.weather, causes.late_aircraft),
         flight=flight,
@@ -89,6 +89,15 @@ def triangulate(row: Row) -> DisruptionEvent:
         air_time=_positive(row, "AIR_TIME"),
         scheduled_time=_positive(row, "SCHEDULED_TIME"),
     )
+    return event.model_copy(update={"decision_time": default_decision_time(event)})
+
+
+def default_decision_time(event: DisruptionEvent) -> str:
+    """CONSTRAINTS.md 3 (GATE-1) default: earliest injected start, else E - 30, as "HH:MM".
+
+    Ignores any decision_time already on the event."""
+    unset = event.model_copy(update={"decision_time": None})
+    return to_hhmm(_clamp_day(constraints.decision_time_min(unset)))
 
 
 def _positive(row: Row, column: str) -> int | None:

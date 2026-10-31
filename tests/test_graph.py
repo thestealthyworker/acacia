@@ -107,7 +107,7 @@ def test_15_slack_uses_workbook_turnaround_at_connecting_station() -> None:
     g = ImpactGraph.build(_frame([a, b]), DATE)
     nxt = g.rotation_next(node_id_for("DL", "1", DATE, "LAX", "JFK", 800))
     assert nxt is not None and nxt[1] == 90 - constraints.min_turnaround("JFK") == 55
-    assert nxt[1] != 90 - config.min_turn(2475)  # the distance rule would give 30
+    assert nxt[1] != 90 - 60  # the old distance rule (60 min over 2000 mi) would give 30
 
 
 def test_15_slack_differs_by_station_and_unknown_airport_uses_nonhub() -> None:

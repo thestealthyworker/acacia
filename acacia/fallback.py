@@ -1,11 +1,13 @@
 """Deterministic rule-based fallback plan (HANDOVER 10). No AI involved.
 
-1. Slot: the earliest ATC free slot (first-come-first-served).
+1. Slot: the earliest ATC free slot (first-come-first-served). When the world is given, only
+   slots still wake-separated on the live runway count (`world.is_separated`, CONSTRAINTS.md 2).
 2. If there is none, or it is past land_by: DIVERT to the nearest airport by haversine
    distance from the destination, excluding the destination, the origin and airports with
    blank coordinates.
-3. Otherwise gate: the non-failed gate with the earliest free time that is free by the gate
-   arrival time, else a remote stand. When the world is given, a gate must be clear for the
+3. Otherwise gate: the assigned gate when it is clear (no gate change, so no notice needed),
+   else the non-failed gate with the earliest free time that is free by the gate arrival
+   time, else a remote stand. When the world is given, a gate must be clear for the
    full turnaround [gate arrival, gate arrival + min_turn) (PLAN 2.A.1). When a ledger view is
    given, the remote stand is the first REMOTE-k (k = 1..REMOTE_STANDS) not booked for that
    interval, so two fallback plans never share one stand.
@@ -95,19 +97,37 @@ def _notice_ok(event: DisruptionEvent, gate_arr: int) -> bool:
     return gate_arr - constraints.decision_time_min(event) >= constraints.GATE_CHANGE_NOTICE_MIN
 
 
+def _gate_clear(private: PrivateState, gate: str, gate_arr: int, world: AirportWorld | None,
+                view: LedgerView) -> bool:
+    g = private.ground
+    free = g.free_from.get(gate)
+    return (gate not in g.failed and free is not None and free <= gate_arr
+            and _fits(world, view, gate, gate_arr, g.min_turn))
+
+
 def _pick_gate(event: DisruptionEvent, private: PrivateState, gate_arr: int,
                world: AirportWorld | None, view: LedgerView, changes_ok: bool = True) -> str | None:
-    """The earliest-free usable gate clear for the turnaround, or None.
+    """The assigned gate if clear for the turnaround, else the earliest-free clear gate, or None.
 
     With changes_ok False (gate-change notice too short) only the assigned gate qualifies."""
     g = private.ground
-    usable = sorted((g.free_from[x], i, x) for i, x in enumerate(g.gates)
-                    if x not in g.failed and g.free_from.get(x) is not None
-                    and (changes_ok or x == g.assigned_gate))
-    for free, _, gate in usable:
-        if free <= gate_arr and _fits(world, view, gate, gate_arr, g.min_turn):  # type: ignore[operator]
-            return gate
-    return None
+    if g.assigned_gate in g.gates and _gate_clear(private, g.assigned_gate, gate_arr, world, view):
+        return g.assigned_gate
+    if not changes_ok:
+        return None
+    others = sorted((g.free_from[x], i, x) for i, x in enumerate(g.gates)
+                    if x != g.assigned_gate and g.free_from.get(x) is not None)
+    return next((x for _, _, x in others if _gate_clear(private, x, gate_arr, world, view)), None)
+
+
+def _separated_slots(event: DisruptionEvent, private: PrivateState, world: AirportWorld | None,
+                     view: LedgerView) -> list[int]:
+    """ATC free slots, earliest first, still wake-separated on the live runway when a world is given."""
+    slots = sorted(private.atc.free_slots)
+    if world is None or not hasattr(world, "is_separated"):
+        return slots
+    own = private.atc.own_class
+    return [s for s in slots if world.is_separated(s, own, view, exclude_event=event.event_id)[0]]
 
 
 def _pick_remote(event: DisruptionEvent, gate_arr: int, min_turn: int, view: LedgerView | None) -> str:
@@ -137,15 +157,12 @@ def plan_fallback(event: DisruptionEvent, private: PrivateState, airports_df: pd
     Pass the airport `world` and the live `ledger_view` so the plan passes the checker's full
     turnaround and remote-stand checks; without them the HANDOVER 10 start-time rule applies.
     """
-    slots = sorted(private.atc.free_slots)
-    land_by = private.pilot.land_by
-    if not slots:
-        return _divert(event, airports_df, "No free runway slot.")
-    slot = slots[0]
-    if slot > land_by:
-        return _divert(event, airports_df,
-                       f"Earliest slot {to_hhmm(slot)} is past the fuel limit {to_hhmm(land_by)}.")
     view = ledger_view if ledger_view is not None else EmptyLedgerView()
+    slots = _separated_slots(event, private, world, view)
+    land_by = private.pilot.land_by
+    if not slots or slots[0] > land_by:
+        return _divert(event, airports_df, _no_slot_reason(private, slots, land_by))
+    slot = slots[0]
     for candidate in (s for s in slots if s <= land_by):
         picked = _gate_for_slot(event, private, candidate, world, view, ledger_view)
         if picked is not None:
@@ -154,8 +171,8 @@ def plan_fallback(event: DisruptionEvent, private: PrivateState, airports_df: pd
                 f" Slot {to_hhmm(candidate)} instead of {to_hhmm(slot)} to meet the "
                 f"{constraints.GATE_CHANGE_NOTICE_MIN} min gate-change notice.")
             return FallbackPlan(event_id=event.event_id, slot=to_hhmm(candidate), gate=gate,
-                                reason="First-come-first-served slot, earliest free gate"
-                                       + (" (none free, remote stand)." if remote else ".") + later)
+                                reason="First-come-first-served slot, " + _gate_text(private, gate, remote)
+                                       + later)
     gate_arr = slot + event.taxi_in
     gate = _pick_gate(event, private, gate_arr, world, view) or _pick_remote(
         event, gate_arr, private.ground.min_turn, ledger_view)
@@ -163,6 +180,23 @@ def plan_fallback(event: DisruptionEvent, private: PrivateState, airports_df: pd
                         reason=f"First-come-first-served slot; no gate meets the "
                                f"{constraints.GATE_CHANGE_NOTICE_MIN} min gate-change notice "
                                "before the fuel limit.")
+
+
+def _no_slot_reason(private: PrivateState, slots: list[int], land_by: int) -> str:
+    """Why no slot works (CONSTRAINTS.md 6), for the divert reason."""
+    if not slots:
+        lost = " (the declared ones are no longer wake-separated)" if private.atc.free_slots else ""
+        return f"Feasible set empty: no separated free runway slot{lost} before LAND_BY {to_hhmm(land_by)}."
+    return (f"Feasible set empty: earliest separated slot {to_hhmm(slots[0])} is past "
+            f"LAND_BY {to_hhmm(land_by)} (fuel limit).")
+
+
+def _gate_text(private: PrivateState, gate: str, remote: bool) -> str:
+    if remote:
+        return "no gate clear for the turnaround, remote stand."
+    if gate == private.ground.assigned_gate:
+        return "assigned gate clear for the turnaround."
+    return "earliest free gate (assigned gate not clear)."
 
 
 def _gate_for_slot(event: DisruptionEvent, private: PrivateState, slot: int,

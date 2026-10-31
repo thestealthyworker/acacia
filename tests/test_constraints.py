@@ -64,5 +64,13 @@ def test_decision_time_is_shared_by_checker_and_agents(dl1639_row) -> None:
 def test_registry_lists_the_build_deviations() -> None:
     ids = [item.id for item in c.REGISTRY]
     assert len(ids) == len(set(ids))
-    assert {"GATE-1", "GATE-2", "WAKE-7", "CAP-8", "FUEL-5", "CREW-1"} <= set(ids)
+    assert {"GATE-1", "GATE-2", "WAKE-7", "CAP-8", "FUEL-5", "CREW-1", "FUEL-6", "KIT-3", "KIT-4"} <= set(ids)
     assert all(item.status in ("AS_GIVEN", "ASSUMED", "CHANGED", "NOT_MODELLED") for item in c.REGISTRY)
+
+
+def test_workbook_numbers_used_outside_the_loader_come_from_it() -> None:
+    """Validator G3: no workbook number is re-typed outside acacia/constraints.py."""
+    from acacia import solver
+
+    assert solver.FUEL_SPAN_MIN == c.SPARE_HOLDING_MIN
+    assert solver.OVERTIME_COST_FACTOR == c.OVERTIME_COST_FACTOR

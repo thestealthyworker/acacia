@@ -103,6 +103,7 @@ def test_fallback_property(event, airports, slots, land_by, free, failed) -> Non
     p = _private(free_slots=slots, land_by=land_by, free_from=free, failed=failed)
     plan = plan_fallback(event, p, airports)
     assert isinstance(plan, FallbackPlan)
+    assert plan.reason  # CONSTRAINTS.md 6: the fallback always says why
     if not slots or min(slots) > land_by:
         assert plan.divert
         return
@@ -174,3 +175,57 @@ def test_remote_stand_skips_one_already_booked(event, airports, tmp_path) -> Non
     plan = plan_fallback(event, p, airports, ledger_view=ledger.live())
     assert plan.gate == "REMOTE-2" and not plan.divert
     assert plan_fallback(event, p, airports).gate == "REMOTE-1"
+
+
+
+# --- CONSTRAINTS.md 3 and 6: assigned gate first, separated slots, reasons -----------------------
+def test_assigned_gate_is_preferred_when_clear(event, airports) -> None:
+    p = _private(free_from={"A7": 700, "A10": 650, "A12": 640})
+    plan = plan_fallback(event, p, airports)
+    assert plan.gate == "A7" and "assigned gate" in plan.reason  # no gate change, no notice needed
+
+
+def test_gate_change_with_exactly_twenty_minutes_notice_is_allowed(event, airports) -> None:
+    timed = event.model_copy(update={"decision_time": "12:10"})  # arrive 12:30: exactly 20 min
+    plan = plan_fallback(timed, _private(free_slots=(740,)), airports)
+    assert (plan.slot, plan.gate) == ("12:20", "A10")
+    tight = event.model_copy(update={"decision_time": "12:11"})  # 19 min: only A7 (busy) qualifies
+    assert plan_fallback(tight, _private(free_slots=(740, 748)), airports).slot == "12:28"
+
+
+class _WakeWorld(_BusyWorld):
+    """World stub whose live runway says some slots are no longer wake-separated."""
+
+    def __init__(self, unseparated: set[int]) -> None:
+        super().__init__({"A7": [], "A10": [], "A12": []})
+        self.unseparated = unseparated
+
+    def is_separated(self, t, own_class, view, exclude_event=None):
+        return t not in self.unseparated, "stub"
+
+
+def test_fallback_skips_slots_no_longer_separated(event, airports) -> None:
+    plan = plan_fallback(event, _private(), airports, world=_WakeWorld({740}))
+    assert plan.slot == "12:28" and not plan.divert
+
+
+def test_divert_when_no_separated_slot_before_land_by(event, airports) -> None:
+    plan = plan_fallback(event, _private(free_slots=(740, 795)), airports, world=_WakeWorld({740}))
+    assert plan.divert and "separated" in plan.reason and "13:10" in plan.reason
+
+
+def test_fallback_with_real_world_passes_the_checker(event, airports, tmp_path) -> None:
+    from acacia.checker import check
+    from acacia.ledger import Ledger
+    from acacia.models import ResolutionPackage
+    from acacia.simulate import build_private
+    from acacia.world import AirportWorld
+
+    world = AirportWorld("ATL", event.flight.date, event.injected)
+    ledger = Ledger(event.flight.date, runs_dir=tmp_path)
+    private = build_private(event, None, world, ledger.view())
+    plan = plan_fallback(event, private, airports, world=world, ledger_view=ledger.live())
+    assert not plan.divert and plan.reason
+    pkg = ResolutionPackage(event_id=event.event_id, package_id="FB", turn=3, slot=plan.slot,
+                            gate=plan.gate, score=0.0, score_breakdown={})
+    assert check(pkg, event, private, world, ledger.live()).passed

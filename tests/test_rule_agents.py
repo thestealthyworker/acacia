@@ -206,3 +206,37 @@ def test_ground_declares_and_enforces_gate_change_notice(event) -> None:
     d, _ = _decide(RuleGround(), late, GROUND, 740, "REMOTE-1")
     assert d.reason_code == ReasonCode.GATE_CHANGE_NOTICE
     assert _decide(RuleGround(), late, GROUND, 755, "A7")[0].verdict == Verdict.ACCEPT  # assigned gate
+
+
+# --- CONSTRAINTS.md 2-5: owned workbook facts -----------------------------------------------------
+def test_atc_wake_separation_value_names_own_class_and_minimums(event) -> None:
+    heavy = ATC.model_copy(update={"own_class": "Heavy"})
+    a_h2 = next(h for h in RuleATC().declare(event, heavy).hard if h.id == "A_H2")
+    assert a_h2.value["own_class"] == "Heavy" and a_h2.value["table"] == "workbook"
+    assert a_h2.value["min_minutes"]["Heavy>Large"] == 2.1  # 5 nm at 140 kt
+    assert a_h2.value["min_minutes"]["Large>Heavy"] == 1.3  # any other pair: 3 nm
+
+
+def test_pilot_declares_burn_and_eta_facts(event) -> None:
+    k = RulePilot().declare(event, PILOT)
+    assert k.facts_owned["eta"] == event.eta_landing == "12:11"
+    assert k.facts_owned["burn_kg_per_h"] == 2400  # narrowbody (Large)
+    wide = RulePilot().declare(event, PILOT.model_copy(update={"wake_class": "Heavy", "burn_kg_per_h": 6500}))
+    assert wide.facts_owned["burn_kg_per_h"] == 6500
+
+
+def test_ground_declares_spare_gates_and_shift_start(event) -> None:
+    g = GROUND.model_copy(update={"spare_gates": 3, "shift_start": 816 - 480})
+    k = RuleGround().declare(event, g)
+    assert k.facts_owned["spare_gates"] == 3 and k.facts_owned["shift_start"] == "05:36"
+
+
+def test_rule_packets_give_holding_fuel_and_overtime_cost(event) -> None:
+    from acacia.solver import solve
+
+    packets = {AgentRole.ATC: RuleATC().declare(event, ATC), AgentRole.PILOT: RulePilot().declare(event, PILOT),
+               AgentRole.GROUND: RuleGround().declare(event, GROUND)}
+    r = solve(packets, event.taxi_in, [], set())
+    c = next(c for c in r.all if c.package.slot == "12:20" and c.package.gate == "A12")
+    assert c.package.score_breakdown["holding_fuel_kg"] == round((740 - 731) * 2400 / 60, 1)
+    assert c.package.score_breakdown["overtime_cost_min"] == 0.0

@@ -7,27 +7,24 @@ at check time (never the snapshot the agents saw). A package is safe only if eve
 passes; each rule returns pass plus a one-line detail string.
 
 Workbook limits come from `acacia.constraints`: wake separation by leader/follower class at
-140 kt (replacing the flat 3 min) and the hard 20 min gate-change notice.
+140 kt (replacing the flat 3 min) and the hard 20 min gate-change notice. SEPARATION checks the
+ATC's traffic snapshot and then `world.is_separated` against the world's traffic plus the live
+ledger (other events' held or committed slots), so a slot booked nearby after ATC declared fails.
 """
 
 from __future__ import annotations
 
-import math
-from functools import lru_cache
-
 from acacia import constraints
 from acacia.config import MINUTES_PER_DAY
 from acacia.models import (
-    CheckResult, DisruptionEvent, LedgerView, PrivateState, ReasonCode, ResolutionPackage,
+    CheckResult, DisruptionEvent, EmptyLedgerView, LedgerView, PrivateState, ReasonCode, ResolutionPackage,
     RuleResult,
 )
 from acacia.timeutil import is_hhmm, to_hhmm, to_min
-from acacia.world import AirportWorld
+from acacia.world import OTHER_EVENT_CLASS, AirportWorld, separation_reach
 
-CHECKER_VERSION = "checker-0.3"
+CHECKER_VERSION = "checker-0.4"
 REMOTE_PREFIX = "REMOTE"
-WAKE_CLASSES = ("Super", "Heavy", "Large", "Small")
-OTHER_EVENT_CLASS = "Large"  # the ledger holds no aircraft class; ASSUMED (DECISIONS)
 
 
 def is_remote(gate: str) -> bool:
@@ -42,10 +39,9 @@ def _span(start: int, end: int) -> str:
     return f"[{to_hhmm(start)}, {to_hhmm(end)})"
 
 
-@lru_cache(maxsize=1)
 def wake_reach() -> int:
     """Whole minutes that cover the largest wake minimum in the workbook table."""
-    return math.ceil(max(constraints.wake_minutes(a, b) for a in WAKE_CLASSES for b in WAKE_CLASSES))
+    return separation_reach()
 
 
 def _wake_gap(slot: int, own: str, t: int, other: str) -> tuple[float, float, str]:
@@ -72,7 +68,23 @@ def _nearest(slot: int, traffic: dict[int, str]) -> dict[int, str]:
     return {t: traffic[t] for t in picks}
 
 
-def check_separation(slot: int, private: PrivateState) -> RuleResult:
+def check_separation(slot: int, private: PrivateState, world: AirportWorld | None = None,
+                     ledger_live: LedgerView | None = None,
+                     exclude_event: str | None = None) -> RuleResult:
+    """Free slot, wake minimum to the ATC's traffic, then the world's wake check (live ledger)."""
+    snapshot = _separation_snapshot(slot, private)
+    if not snapshot.passed or world is None or not hasattr(world, "is_separated"):
+        return snapshot
+    own = private.atc.own_class
+    ok, detail = world.is_separated(slot, own, ledger_live or EmptyLedgerView(),
+                                    exclude_event=exclude_event)
+    if not ok:
+        return _result(ReasonCode.SEPARATION, False,
+                       f"{to_hhmm(slot)} breaks wake separation ({own}) on the live runway: {detail}.")
+    return _result(ReasonCode.SEPARATION, True, snapshot.detail.rstrip(".") + f"; live runway {detail}.")
+
+
+def _separation_snapshot(slot: int, private: PrivateState) -> RuleResult:
     atc = private.atc
     if slot not in atc.free_slots:
         free = ", ".join(to_hhmm(s) for s in sorted(atc.free_slots)) or "none"
@@ -197,7 +209,7 @@ def check(package: ResolutionPackage, event: DisruptionEvent, private: PrivateSt
     airport = (airport or event.flight.dest).upper()
     slot, gate = to_min(package.slot), package.gate
     rules = [
-        check_separation(slot, private),
+        check_separation(slot, private, world, ledger_live, exclude_event=event.event_id),
         check_fuel(slot, private),
         check_gate(slot, gate, event, private, world),
         check_crew(slot, event, private),

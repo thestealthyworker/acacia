@@ -157,3 +157,28 @@ def test_full_event_without_injected_must_qualify(sample_store, dl1639_row) -> N
         to_event({"event": event}, sample_store)
     event["causes"] = {"weather": 16, "late_aircraft": 0}
     assert to_event({"event": event}, sample_store).injected == []
+
+
+# --- CONSTRAINTS.md 3: decision time for the gate-change notice ----------------------------------
+def test_decision_time_default_follows_final_injected(sample_store) -> None:
+    payload = {"flight": DL_REF, "injected": [
+        {"type": "EQUIPMENT_FAILURE", "ref": "jet bridge", "start": "11:20", "end": "14:00"},
+        {"type": "RUNWAY_CLOSED", "ref": "r", "start": "11:50", "end": "12:30"}]}
+    event = to_event(payload, sample_store)
+    assert event.decision_time == "11:20"  # earliest injected start, not the triangulated one
+    assert "decision_time" not in event.overrides
+
+
+def test_payload_sets_decision_time_and_records_it(sample_store) -> None:
+    top = to_event({"flight": DL_REF, "decision_time": "11:30"}, sample_store)
+    assert top.decision_time == "11:30" and top.overrides == ["decision_time"]
+    nested = to_event({"flight": DL_REF, "overrides": {"decision_time": "11:45"}}, sample_store)
+    assert nested.decision_time == "11:45" and nested.overrides == ["decision_time"]
+    with pytest.raises(TriggerError):
+        to_event({"flight": DL_REF, "decision_time": "25:00"}, sample_store)
+
+
+def test_event_without_injected_defaults_decision_time_to_e_minus_30(sample_store, dl1639_row) -> None:
+    event = triangulate(dl1639_row).model_dump(mode="json")
+    event.update(injected=[], decision_time=None, causes={"weather": 16, "late_aircraft": 0})
+    assert to_event({"event": event}, sample_store).decision_time == "11:41"

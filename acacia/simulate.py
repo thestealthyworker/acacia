@@ -24,19 +24,16 @@ from acacia.models import (
     AtcPrivate, DisruptionEvent, GroundPrivate, LedgerView, PilotPrivate, PrivateState, Stress,
 )
 from acacia.timeutil import to_min
-from acacia.world import AirportWorld
+from acacia.world import OTHER_EVENT_CLASS, AirportWorld, separation_reach
 
 QUEUE_WEATHER_FACTOR = 0.6
 QUEUE_RANGE = (3, 8)
 SLOTS_WITH_CLOSURE = 3
 SLOTS_WITHOUT_CLOSURE = 4
-CANDIDATE_FACTOR = 8          # world candidates fetched per declared slot, before wake filtering
 DEMAND_MAX = 4
 DEMAND_MIN = 1
 TRAFFIC_BEFORE_E = 24
 TRAFFIC_AFTER_E = 150
-WAKE_REACH = 4                # minutes either side to look for neighbours (> 8 nm = 3.43 min)
-DEFAULT_WAKE_CLASS = "Large"  # traffic class when the world has none, and for other events' slots
 LOW_FUEL_MARGIN = 3
 HUB_PAX_RANGE = (24, 60)
 OTHER_PAX_RANGE = (6, 30)
@@ -71,48 +68,14 @@ def _closure_near(world: AirportWorld, eta: int, first: int) -> bool:
 
 
 # --- runway: traffic and wake separation (CONSTRAINTS.md 2) -----------------------------------
-def _traffic_class(world: AirportWorld, t: int) -> str:
-    """Wake class of background traffic at t; the world's seeded class once it provides one."""
-    lookup = getattr(world, "traffic_class", None)
-    return lookup(t) if callable(lookup) else DEFAULT_WAKE_CLASS
-
-
 def _neighbours(world: AirportWorld, view: LedgerView, start: int, end: int) -> dict[int, str]:
-    """Traffic and other events' held slots in [start, end), with their wake classes."""
+    """Traffic (seeded wake class) and other events' held slots (Large, WAKE-7) in [start, end)."""
     start, end = max(0, start), min(config.MINUTES_PER_DAY, end)
-    out = {t: _traffic_class(world, t) for t in world.traffic_times(start, end)}
+    out = {t: world.traffic_class(t) or OTHER_EVENT_CLASS for t in world.traffic_times(start, end)}
     for p in world.grid():
         if start <= p < end and p not in out and view.slot_taken(world.airport, p):
-            out[p] = DEFAULT_WAKE_CLASS
+            out[p] = OTHER_EVENT_CLASS
     return out
-
-
-def wake_separated(slot: int, own_class: str, neighbours: dict[int, str]) -> bool:
-    """Separated from the nearest previous and next movement by the workbook wake minimum."""
-    prev = [t for t in neighbours if t <= slot]
-    nxt = [t for t in neighbours if t > slot]
-    if prev:
-        lead = max(prev)
-        if slot - lead < constraints.wake_minutes(neighbours[lead], own_class):
-            return False
-    if nxt:
-        follow = min(nxt)
-        if follow - slot < constraints.wake_minutes(own_class, neighbours[follow]):
-            return False
-    return True
-
-
-def _separated_slots(world: AirportWorld, first: int, count: int, own_class: str,
-                     view: LedgerView) -> list[int]:
-    """ATC declares only wake-separated free slots: the world's free points, filtered."""
-    candidates = world.free_slots_after(first, count * CANDIDATE_FACTOR, view)
-    slots: list[int] = []
-    for s in candidates:
-        if wake_separated(s, own_class, _neighbours(world, view, s - WAKE_REACH, s + WAKE_REACH + 1)):
-            slots.append(s)
-        if len(slots) == count:
-            break
-    return slots
 
 
 def _atc(event: DisruptionEvent, world: AirportWorld, view: LedgerView, rng: random.Random) -> AtcPrivate:
@@ -120,13 +83,14 @@ def _atc(event: DisruptionEvent, world: AirportWorld, view: LedgerView, rng: ran
     first = eta + _queue(event, rng)
     closure = _closure_near(world, eta, first)
     own = constraints.wake_class(event.distance)
-    slots = _separated_slots(world, first, SLOTS_WITH_CLOSURE if closure else SLOTS_WITHOUT_CLOSURE,
-                             own, view)
+    count = SLOTS_WITH_CLOSURE if closure else SLOTS_WITHOUT_CLOSURE
+    slots = world.free_slots_after(first, count, view, own_class=own)  # wake-separated only
     demand = {
         slot: max(DEMAND_MIN, min(DEMAND_MAX, DEMAND_MAX - i + rng.randint(0, 1)))
         for i, slot in enumerate(slots)
     }
-    window_end = max([eta + TRAFFIC_AFTER_E, *(s + WAKE_REACH for s in slots)])
+    reach = separation_reach()
+    window_end = max([eta + TRAFFIC_AFTER_E, *(s + reach for s in slots)])
     traffic = _neighbours(world, view, eta - TRAFFIC_BEFORE_E, window_end + 1)
     closures = [(s, e) for s, e in world.closures() if s <= window_end and eta - TRAFFIC_BEFORE_E < e]
     return AtcPrivate(first=first, free_slots=slots, demand=demand, traffic=sorted(traffic),
@@ -143,8 +107,10 @@ def _pilot(event: DisruptionEvent, stress: Stress, first: int, rng: random.Rando
     pax = rng.randint(*pax_range)
     connect_by = to_min(event.sched_arrival) + rng.randint(*CONNECT_BY_RANGE)
     crew_end = constraints.crew_duty_end(to_min(event.sched_arrival), event.scheduled_time)
+    wake = constraints.wake_class(event.distance)
     return PilotPrivate(land_by=land_by, pax=pax, connect_by=connect_by, low_fuel=stress.low_fuel,
-                        crew_duty_end=crew_end)
+                        crew_duty_end=crew_end, wake_class=wake,
+                        burn_kg_per_h=constraints.burn_kg_per_h(wake))
 
 
 # --- ground (CONSTRAINTS.md 3, 5) -------------------------------------------------------------
@@ -160,13 +126,16 @@ def _pick_gates(world: AirportWorld, assigned: str, free_from: dict[str, int | N
 
 
 def _ground(event: DisruptionEvent, stress: Stress, first: int, world: AirportWorld,
-            view: LedgerView, rng: random.Random) -> GroundPrivate:
+            view: LedgerView, rng: random.Random, last_slot: int | None = None) -> GroundPrivate:
     eta, ti = to_min(event.eta_landing), event.taxi_in
     gate_arrival = eta + ti
     limits = constraints.airport_limits(world.airport)
     turn = limits.min_turnaround_min
     assigned = rng.choice(world.gates())
-    free_all = {g: world.gate_free_from(g, gate_arrival, view, duration=turn) for g in world.gates()}
+    # G_H1 is one free-from time per gate, so it must hold for the turnaround from every offered
+    # slot at or after it: ask for a window that also spans up to the last offered gate arrival.
+    span = turn + max(0, (last_slot + ti - gate_arrival) if last_slot is not None else 0)
+    free_all = {g: world.gate_free_from(g, gate_arrival, view, duration=span) for g in world.gates()}
     gates = _pick_gates(world, assigned, free_all, limits.spare_gates)
     shift_drawn = gate_arrival + turn + rng.randint(*SHIFT_RANGE)
     shift_end = first + ti + turn - TIGHT_CREW_SLACK if stress.tight_crew else shift_drawn
@@ -175,7 +144,8 @@ def _ground(event: DisruptionEvent, stress: Stress, first: int, world: AirportWo
         gates=gates, assigned_gate=assigned, free_from={g: free_all[g] for g in gates},
         failed=[g for g in gates if world.is_failed(g, gate_arrival)], min_turn=turn,
         shift_end=shift_end, duty_limit=shift_end + constraints.GROUND_MAX_OVERTIME_MIN,
-        next_departure=next_departure,
+        next_departure=next_departure, shift_start=shift_end - constraints.GROUND_SHIFT_MIN,
+        spare_gates=limits.spare_gates,
     )
 
 
@@ -187,7 +157,8 @@ def build_private(event: DisruptionEvent, stress: Stress | None, world: AirportW
     rng = private_rng(event)
     atc = _atc(event, world, ledger_view, rng)
     pilot = _pilot(event, stress, atc.first, rng)
-    ground = _ground(event, stress, atc.first, world, ledger_view, rng)
+    ground = _ground(event, stress, atc.first, world, ledger_view, rng,
+                     last_slot=max(atc.free_slots, default=None))
     return PrivateState(atc=atc, pilot=pilot, ground=ground)
 
 

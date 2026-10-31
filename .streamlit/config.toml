@@ -1,0 +1,2 @@
+[theme]
+primaryColor = "#0d6d86"  # ui/theme.py --accent, so radios and toggles match

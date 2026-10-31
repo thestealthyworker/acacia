@@ -93,3 +93,18 @@ def test_air_time_and_scheduled_time_filled_from_row(make_row) -> None:
 def test_severe_storm_when_weather_delay_over_45(make_row) -> None:
     (storm,) = triangulate(make_row(WEATHER_DELAY="46")).injected
     assert storm.severity == "severe" and storm.ref == "storm (severe): arrival capacity x0.4"
+
+
+def test_decision_time_defaults_to_earliest_injected_start(make_row) -> None:
+    # CONSTRAINTS.md 3 (GATE-1): decision time = start of the earliest injected event
+    event = triangulate(make_row())
+    assert event.decision_time == event.injected[0].start == "12:01"
+    knock_on = triangulate(make_row(WEATHER_DELAY="0"))
+    assert knock_on.decision_time == knock_on.injected[0].start  # equipment failure E - 20
+
+
+def test_default_decision_time_without_injected_is_e_minus_30(make_row) -> None:
+    from acacia.triangulate import default_decision_time
+
+    event = triangulate(make_row()).model_copy(update={"injected": [], "decision_time": None})
+    assert default_decision_time(event) == "11:41"  # E 12:11 - 30

@@ -16,6 +16,18 @@ minutes between `decision_time` and gate arrival (a hard challenge rule). REMOTE
 a gate change. Slots, runway, fuel and passengers belong to the other agents: never declare or
 assume them.
 
+## Challenge workbook limits you own
+
+These come from the challenge operational-constraints workbook; your private state already holds
+the values for this flight, so copy them and never restate them from memory:
+
+- Minimum turnaround at this airport (`min_turn_min`).
+- Spare gates: you may offer the assigned gate plus the airport's spare gates; your gate list
+  already has that size.
+- Gate-change notice: at least 20 min between the decision time and gate arrival for any gate
+  other than the assigned one (REMOTE-* stands included), a hard limit (`gate_change_notice`).
+- Ground crew shift: 8 h, overtime costs 1.5x; the duty limit is the hard end of allowed overtime.
+
 ## Step "declare": call submit_constraint_packet
 
 Copy these values exactly from your private state:

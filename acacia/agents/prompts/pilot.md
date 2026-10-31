@@ -15,6 +15,18 @@ follows the challenge fuel rules: 45 min of holding above the 30 min final reser
 contingency, so landing by `land_by` never plans below the final reserve. Slots,
 runway, gates and crew shifts belong to the other agents: never declare or assume them.
 
+## Challenge workbook limits you own
+
+These come from the challenge operational-constraints workbook; your private state already holds
+the values for this flight, so copy them and never restate them from memory:
+
+- Final fuel reserve: 30 min of holding fuel, never planned below.
+- Spare fuel on arrival: 45 min of holding above the final reserve, plus contingency fuel of 5% of
+  trip fuel. Together these give `land_by`.
+- Holding fuel burn: narrowbody or widebody rate in kg per hour (`burn_kg_per_h`, when your
+  private state gives it). The coordinator reports holding fuel from it; it is not a hard limit.
+- Flight crew duty: 13 h from report time (`crew_duty_end`), a hard limit.
+
 ## Step "declare": call submit_constraint_packet
 
 Copy these values exactly from your private state:
@@ -24,7 +36,9 @@ Copy these values exactly from your private state:
 - soft `P_S1`, metric `gate_arrival_by`, weight 0.7, target = connect_by "HH:MM", stake = connecting passengers (integer), preference = one short sentence.
 - soft `P_S2`, metric `fuel_margin`, weight 0.3, target = the event's eta_landing "HH:MM", preference = one short sentence about fuel margin.
 - options: none (empty list).
-- facts_owned: `fuel_endurance_until` (land_by "HH:MM") and `connecting_pax` (integer).
+- facts_owned: `fuel_endurance_until` (land_by "HH:MM"), `connecting_pax` (integer), `eta` (the
+  event's eta_landing "HH:MM", required: the solver measures fuel margin from it) and
+  `burn_kg_per_h` (integer, only if your private state gives it).
 
 ## Step "decide": call submit_decision
 

@@ -2,7 +2,13 @@
 
 ISOLATION: `solve` takes only declared ConstraintPackets, the taxi-in time, cuts and the
 packages already tried. It has no parameter for private state, so it cannot read it.
-Every number comes from declared hard limits, soft preferences and options.
+Every number comes from declared hard limits, soft preferences, options and facts_owned.
+
+CONSTRAINTS.md 4-5: fuel utility spans land_by - E (E = the Pilot's declared `eta` fact, else
+the P_S2 target); crew utility = max(0, 1 - 1.5 x overtime / 60). `score_breakdown` also carries
+the informational keys `holding_fuel_kg` (when the Pilot declares `eta` and `burn_kg_per_h`) and
+`overtime_cost_min` (when Ground declares a G_S1 shift-end target); they are never part of the
+weighted score, which sums the POLICY keys only.
 """
 
 from __future__ import annotations
@@ -13,13 +19,14 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from acacia.config import POLICY
+from acacia.constraints import OVERTIME_COST_FACTOR, SPARE_HOLDING_MIN
 from acacia.models import (
     HHMM, AgentRole, ConstraintPacket, Decision, ReasonCode, ResolutionPackage, Stress, Verdict,
 )
 from acacia.timeutil import is_hhmm, to_hhmm, to_min
 
-SOLVER_VERSION = "solver-0.2"
-FUEL_SPAN_MIN = 45  # used when the Pilot declares no earliest landing (P_S2 target)
+SOLVER_VERSION = "solver-0.3"
+FUEL_SPAN_MIN = SPARE_HOLDING_MIN  # FUEL-5: used when the Pilot declares no earliest landing
 CONNECTION_SPAN_MIN = 30
 OVERTIME_SPAN_MIN = 60
 OTHER_GATE_UTILITY = 0.6
@@ -75,6 +82,8 @@ class _Decl:
     min_turn: int
     prefs: dict[str, tuple[str, str, object]]  # id -> (metric, owner role value, target)
     traffic: tuple[int, ...]
+    eta: int | None = None  # Pilot fact "eta" (earliest landing E)
+    burn_kg_per_h: float | None = None  # Pilot fact "burn_kg_per_h" (holding burn)
 
 
 def package_key(slot: str, gate: str) -> str:
@@ -107,7 +116,21 @@ def _parse(packets: dict[AgentRole, ConstraintPacket]) -> _Decl:
         min_turn=int((gr.facts_owned if gr else {}).get("min_turn_min", 0)),
         prefs=prefs,
         traffic=tuple(to_min(t) for t in (atc.facts_owned if atc else {}).get("traffic", [])),
+        eta=_fact_time(pil, "eta"),
+        burn_kg_per_h=_fact_number(pil, "burn_kg_per_h"),
     )
+
+
+def _fact_time(packet: ConstraintPacket | None, key: str) -> int | None:
+    value = (packet.facts_owned if packet else {}).get(key)
+    return to_min(value) if is_hhmm(value) else None
+
+
+def _fact_number(packet: ConstraintPacket | None, key: str) -> float | None:
+    value = (packet.facts_owned if packet else {}).get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return float(value)
 
 
 def _notice(value: object) -> tuple[int, int, str] | None:
@@ -157,16 +180,34 @@ def _utility(d: _Decl, metric: str, target: object, slot: int, demand: int, gate
     if metric == "fuel_margin":
         if d.land_by is None:
             return NO_PREF_UTILITY
-        eta = to_min(target) if is_hhmm(target) else None
+        eta = d.eta if d.eta is not None else (to_min(target) if is_hhmm(target) else None)
         span = d.land_by - eta if eta is not None and eta < d.land_by else FUEL_SPAN_MIN
         return min(1.0, max(0.0, (d.land_by - slot) / span))
     if metric == "turnaround_done_by":
-        tgt = to_min(target) if isinstance(target, str) else None
-        overtime = 0 if tgt is None else max(0, gate_arr + d.min_turn - tgt)
-        return 1.0 if overtime == 0 else max(0.0, 1 - overtime / OVERTIME_SPAN_MIN)
+        overtime = _overtime(d, target, gate_arr) or 0
+        return max(0.0, 1 - OVERTIME_COST_FACTOR * overtime / OVERTIME_SPAN_MIN)
     if metric == "keep_gate":
         return 1.0 if target in (None, gate) else OTHER_GATE_UTILITY
     raise ValueError(f"unknown soft-preference metric {metric!r}")
+
+
+def _overtime(d: _Decl, shift_end: object, gate_arr: int) -> int | None:
+    """Crew overtime past a declared shift end, or None when no shift end is declared."""
+    if not is_hhmm(shift_end):
+        return None
+    return max(0, gate_arr + d.min_turn - to_min(shift_end))  # type: ignore[arg-type]
+
+
+def _info(d: _Decl, slot: int, gate_arr: int) -> dict[str, float]:
+    """Informational score_breakdown keys (CONSTRAINTS.md 4-5); never part of the score."""
+    out: dict[str, float] = {}
+    if d.eta is not None and d.burn_kg_per_h is not None:
+        out["holding_fuel_kg"] = round(max(0, slot - d.eta) * d.burn_kg_per_h / 60.0, 1)
+    shift = next((t for m, _, t in d.prefs.values() if m == "turnaround_done_by" and is_hhmm(t)), None)
+    overtime = _overtime(d, shift, gate_arr)
+    if overtime is not None:
+        out["overtime_cost_min"] = round(OVERTIME_COST_FACTOR * overtime, 1)
+    return out
 
 
 def _utilities(d: _Decl, slot: int, demand: int, gate: str, taxi_in: int) -> dict[str, float]:
@@ -205,7 +246,7 @@ def _cut_hit(cut: Cut, slot: int, gate: str, utils: dict[str, float]) -> bool:
 
 
 _HARD_CUT_KIND = {"A_H1": "SLOT", "G_H1": "GATE", "P_H1": "SLOT_FROM", "G_H2": "SLOT_FROM",
-                  "P_H2": "SLOT_FROM"}  # G_H3 and other hard ids cut the exact package
+                  "P_H2": "SLOT_FROM", "G_H3": "GATE"}  # other hard ids cut the exact package
 
 
 def cut_from_reject(decision: Decision, package: ResolutionPackage,
@@ -244,8 +285,9 @@ def _candidate(d: _Decl, pid: str, slot: int, demand: int, gate: str, taxi_in: i
     utils = _utilities(d, slot, demand, gate, taxi_in)
     bd = _breakdown(d, utils)
     why = _discard(d, slot, gate, taxi_in)
+    score = round(sum(bd.values()), 6)  # weighted POLICY keys only
     pkg = ResolutionPackage(event_id=d.event_id, package_id=pid, turn=turn, slot=to_hhmm(slot),
-                            gate=gate, score=round(sum(bd.values()), 6), score_breakdown=bd,
+                            gate=gate, score=score, score_breakdown={**bd, **_info(d, slot, slot + taxi_in)},
                             satisfies_hard=not why)
     cut = next((c for c in cuts if _cut_hit(c, slot, gate, utils)), None)
     status: Status = "DISCARDED" if why else "CUT" if cut else (

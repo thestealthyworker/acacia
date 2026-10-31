@@ -293,7 +293,7 @@ def test_remote_stand_counts_as_a_gate_change(event) -> None:
 
 def test_decision_time_defaults(event) -> None:
     assert checker.decision_time_min(event) == 12 * 60 + 1  # earliest injected start (12:01)
-    bare = event.model_copy(update={"injected": []})
+    bare = event.model_copy(update={"injected": [], "decision_time": None})
     assert checker.decision_time_min(bare) == 12 * 60 + 11 - 30  # E - 30
     assert checker.decision_time_min(event.model_copy(update={"decision_time": "11:00"})) == 660
 
@@ -316,3 +316,49 @@ def test_checker_does_not_import_solver() -> None:
             imported |= {f"{node.module}.{a.name}" for a in node.names}
     assert not any("solver" in name for name in imported), imported
     assert "solver" in (checker.__doc__ or "")
+
+
+
+# --- SEPARATION against the real world and the live ledger (CONSTRAINTS.md 2) ------------------
+def test_separation_uses_world_wake_check_with_live_ledger(event, ledger) -> None:
+    world = AirportWorld("ATL", event.flight.date, event.injected)
+    private = build_private(event, None, world, ledger.view())
+    slot, gate = private.atc.free_slots[0], private.ground.assigned_gate
+    ok = _rule(check(_pkg(event, slot, gate), event, private, world, ledger.live()), ReasonCode.SEPARATION)
+    assert ok.passed and "separated" in ok.detail
+    ledger.hold("OTHER", "ATL", slot + 1, "REMOTE-9", slot + 11, slot + 56)  # 1 min behind: < 1.29
+    bad = _rule(check(_pkg(event, slot, gate), event, private, world, ledger.live()), ReasonCode.SEPARATION)
+    assert not bad.passed and "wake" in bad.detail
+
+
+def test_separation_ignores_the_events_own_held_slot(event, ledger) -> None:
+    world = AirportWorld("ATL", event.flight.date, event.injected)
+    private = build_private(event, None, world, ledger.view())
+    slot, gate = private.atc.free_slots[0], private.ground.assigned_gate
+    ledger.hold(event.event_id, "ATL", slot, gate, slot + TI, slot + TI + private.ground.min_turn)
+    result = check(_pkg(event, slot, gate), event, private, world, ledger.live())
+    assert _rule(result, ReasonCode.SEPARATION).passed
+
+
+def test_world_separation_exactly_at_the_wake_minimum_passes(event) -> None:
+    """A movement exactly the wake minimum ahead passes; the world decides with float minutes."""
+
+    class SeparatedAt(FakeWorld):
+        def __init__(self, ok: bool) -> None:
+            super().__init__()
+            self.ok, self.calls = ok, []
+
+        def is_separated(self, t, own_class, view, exclude_event=None):
+            self.calls.append((t, own_class, exclude_event))
+            return self.ok, "3 min behind Super at 737 (need 3.00)" if self.ok else "need 3.00"
+
+    w = SeparatedAt(True)
+    assert _rule(_run(event, _private(), 740, world=w), ReasonCode.SEPARATION).passed
+    assert w.calls == [(740, "Large", event.event_id)]
+    assert not _rule(_run(event, _private(), 740, world=SeparatedAt(False)), ReasonCode.SEPARATION).passed
+
+
+def test_gate_turnaround_interval_uses_private_min_turn(event) -> None:
+    busy = FakeWorld(busy={"A7": [(784, 800)]})  # turnaround [750, 750 + min_turn)
+    assert _rule(_run(event, _private(min_turn=34), 740, world=busy), ReasonCode.GATE_CONFLICT).passed
+    assert not _rule(_run(event, _private(min_turn=35), 740, world=busy), ReasonCode.GATE_CONFLICT).passed

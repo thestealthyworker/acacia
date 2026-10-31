@@ -64,8 +64,8 @@ def test_atc_weather_queue_and_closure_slots(event, world) -> None:
     eta = to_min(event.eta_landing)
     assert atc.first == eta + round(30 * 0.6)
     assert len(atc.free_slots) == 3  # closure overlaps [E, first]
-    candidates = world.free_slots_after(atc.first, 12, EMPTY)
-    assert atc.free_slots == [s for s in candidates if _wake_ok(s, "Large", atc)][:3]
+    assert atc.free_slots == world.free_slots_after(atc.first, 3, EMPTY, own_class="Large")
+    assert all(world.is_separated(s, "Large", EMPTY)[0] for s in atc.free_slots)
     assert all(s >= atc.first and not world.is_traffic(s) for s in atc.free_slots)
     assert atc.closures
 
@@ -80,15 +80,26 @@ def test_atc_wake_classes(event, world, make_row) -> None:
     assert build_private(heavy, None, world, EMPTY).atc.own_class == "Heavy"
 
 
-def test_free_slot_too_close_behind_heavy_traffic_is_dropped(event, world, monkeypatch) -> None:
-    """A free point 2 min behind a Heavy (5 nm = 2.14 min) is not declared; behind a Large it is."""
-    eta = to_min(event.eta_landing)
-    lead = next(t for t in world.traffic_times(eta, eta + 150) if not world.is_traffic(t + 2))
-    monkeypatch.setattr(world, "free_slots_after", lambda t, n, view: [lead + 2, lead + 40, lead + 60])
-    assert lead + 2 in build_private(event, None, world, EMPTY).atc.free_slots
-    monkeypatch.setattr(world, "traffic_class", lambda t: "Heavy", raising=False)
+def test_atc_asks_the_world_for_slots_separated_for_its_own_class(event, world, make_row,
+                                                                  monkeypatch) -> None:
+    """ATC declares exactly the world's wake-separated free slots for its own class (3 near a storm)."""
+    calls: list[tuple[int, int, str]] = []
+    real = world.free_slots_after
+
+    def spy(t, n, view, own_class="Large"):
+        calls.append((t, n, own_class))
+        return real(t, n, view, own_class=own_class)
+
+    monkeypatch.setattr(world, "free_slots_after", spy)
+    heavy = triangulate(make_row(DISTANCE="2100"))
+    atc = build_private(heavy, None, world, EMPTY).atc
+    assert calls == [(atc.first, 3, "Heavy")]
+    assert all(world.is_separated(s, "Heavy", EMPTY)[0] for s in atc.free_slots)
+
+
+def test_traffic_classes_come_from_the_world(event, world) -> None:
     atc = build_private(event, None, world, EMPTY).atc
-    assert lead + 2 not in atc.free_slots and atc.traffic_classes[lead] == "Heavy"
+    assert atc.traffic_classes == {t: world.traffic_class(t) for t in atc.traffic}
 
 
 def test_atc_demand_traffic_and_no_closure(calm_event, calm_world) -> None:
@@ -152,16 +163,18 @@ def test_non_hub_pax_range(make_row, sample_store) -> None:
 
 
 def test_ground_gates_and_free_from_come_from_world(event, world) -> None:
-    g = build_private(event, None, world, EMPTY).ground
+    private = build_private(event, None, world, EMPTY)
+    g = private.ground
     t = to_min(event.eta_landing) + event.taxi_in
+    span = g.min_turn + max(0, max(private.atc.free_slots) + event.taxi_in - t)  # every offered slot
     assert g.min_turn == 45  # CAP-6: ATL workbook turnaround, not the distance rule (35)
     assert len(g.gates) == 1 + 3  # CAP-5: assigned + ATL's 3 spare gates
     assert len(set(g.gates)) == len(g.gates) and g.gates[0] == g.assigned_gate
     assert set(g.gates) <= set(world.gates())
     for gate in g.gates:
-        assert g.free_from[gate] == world.gate_free_from(gate, t, EMPTY, duration=g.min_turn)
+        assert g.free_from[gate] == world.gate_free_from(gate, t, EMPTY, duration=span)
     others = [x for x in world.gates() if x != g.assigned_gate]
-    best = sorted(world.gate_free_from(x, t, EMPTY, duration=45) or 10**6 for x in others)[:3]
+    best = sorted(world.gate_free_from(x, t, EMPTY, duration=span) or 10**6 for x in others)[:3]
     assert sorted(g.free_from[x] or 10**6 for x in g.gates[1:]) == best
 
 
@@ -179,6 +192,8 @@ def test_ground_shift_duty_and_next_departure(event, world) -> None:
     sched = to_min(event.sched_arrival)
     assert t + 45 + 25 <= g.shift_end <= t + 45 + 85
     assert g.duty_limit == g.shift_end + 45  # CREW-3: 45 min max overtime
+    assert g.shift_start == g.shift_end - 480  # CREW-2: 8 h shift
+    assert g.spare_gates == 3  # CAP-5: ATL
     assert sched + 45 + 20 <= g.next_departure <= sched + 45 + 60
 
 
@@ -220,3 +235,30 @@ def test_land_by_and_first_slot_matches_private_state(event, world) -> None:
     p = build_private(event, Stress(low_fuel=True), world, EMPTY)
     assert land_by_and_first_slot(event, Stress(low_fuel=True), world, EMPTY) == (
         p.pilot.land_by, p.atc.free_slots[0])
+
+
+def test_pilot_wake_class_burn_and_crew_duty_end(event, world, make_row) -> None:
+    # CONSTRAINTS.md 4: duty end = (scheduled departure - 60) + 780, scheduled departure = S - SCHEDULED_TIME
+    p = build_private(event, None, world, EMPTY).pilot
+    assert p.wake_class == "Large" and p.burn_kg_per_h == 2400
+    assert p.crew_duty_end == (to_min(event.sched_arrival) - event.scheduled_time - 60) + 780
+    heavy = build_private(triangulate(make_row(DISTANCE="2100")), None, world, EMPTY).pilot
+    assert heavy.wake_class == "Heavy" and heavy.burn_kg_per_h == 6500
+
+
+def test_declared_gate_free_from_holds_for_every_offered_slot(sample_store) -> None:
+    """G_H1 is a single free-from time per gate, so it must be true for the whole turnaround
+    from every offered slot at or after it (validator G3: AA8 HNL-DFW had a checker GATE_CONFLICT
+    on a busy interval that started after the declared free time)."""
+    for _, row in sample_store.qualifying_rows().iterrows():
+        ev = triangulate(row.to_dict())
+        w = AirportWorld(ev.flight.dest, ev.flight.date, ev.injected)
+        p = build_private(ev, None, w, EMPTY)
+        for gate, free in p.ground.free_from.items():
+            if free is None:
+                continue
+            for slot in p.atc.free_slots:
+                arr = slot + ev.taxi_in
+                if arr >= free:
+                    assert w.gate_free_from(gate, arr, EMPTY, duration=p.ground.min_turn) == arr, (
+                        ev.flight.code, gate, slot)

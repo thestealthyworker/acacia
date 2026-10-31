@@ -3,11 +3,18 @@
 The runway grid follows the workbook arrival capacity: points step 60 / R(t) minutes
 (accumulated as a float, rounded to whole minutes, duplicates dropped), where R is 50% of the
 airport's max runway movements per hour, x0.6 / x0.4 inside a moderate / severe storm window
-(a RUNWAY_CLOSED injected event). Each point carries a seeded wake class (Heavy/Large/Small
-15/80/5), drawn from its own rng so the gate draws do not depend on it.
+(a RUNWAY_CLOSED injected event). Each traffic point carries a seeded wake class
+(Heavy/Large/Small 15/80/5), drawn from its own rng so the gate draws do not depend on it.
+
+Wake separation (CONSTRAINTS.md 2): a point is separated for an aircraft of `own_class` when it
+is at least `constraints.wake_minutes` behind the nearest earlier movement and ahead of the
+nearest later one. Movements are background traffic (their seeded class) and other events'
+HELD/COMMITTED runway slots read through the ledger view (class Large, WAKE-7). The rule is
+applied across the merged arrival stream (WAKE-4). `free_slots_after` returns only such points.
 
 One `AirportWorld` per (airport, date, injected set): a runway grid with background traffic, a
-pool of 8 gates with background busy intervals, and equipment-failure intervals. It is built
+pool of `constraints.WORLD_GATE_POOL` gates with background busy intervals (CAP-4), and
+equipment-failure intervals. It is built
 once from the full injected list and cached; nothing here calls an LLM or reads the ledger
 except through the `LedgerView` the caller passes in.
 
@@ -16,7 +23,9 @@ Times are int minutes after local midnight; intervals are half-open [start, end)
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
+from functools import lru_cache
 
 from acacia import config, constraints
 from acacia.models import Injected, LedgerView
@@ -26,7 +35,9 @@ Interval = tuple[int, int]
 
 TRAFFIC_PROBABILITY = constraints.BACKGROUND_LOAD  # CAP-7
 DEFAULT_STORM = "moderate"  # CAP-8: a RUNWAY_CLOSED window without a severity
-GATE_COUNT = 8
+OTHER_EVENT_CLASS = "Large"  # WAKE-7: the ledger stores no aircraft class
+WAKE_CLASSES = ("Super", "Heavy", "Large", "Small")
+GATE_COUNT = constraints.WORLD_GATE_POOL  # CAP-4
 GATE_NUMBER_RANGE = (1, 30)
 BUSY_COUNT_RANGE = (2, 4)
 BUSY_START_RANGE = (5 * 60, 22 * 60)
@@ -56,6 +67,19 @@ def _overlaps(intervals: Sequence[Interval], start: int, end: int) -> list[Inter
 
 def _contains(intervals: Sequence[Interval], t: int) -> bool:
     return any(s <= t < e for s, e in intervals)
+
+
+@lru_cache(maxsize=1)
+def separation_reach() -> int:
+    """Whole minutes that cover the widest workbook wake minimum: movements further away than
+    this can never violate separation, so only this window is scanned."""
+    return math.ceil(max(constraints.wake_minutes(a, b) for a in WAKE_CLASSES for b in WAKE_CLASSES))
+
+
+def _slot_taken(view: LedgerView, airport: str, t: int, exclude_event: str | None) -> bool:
+    if exclude_event is None:
+        return view.slot_taken(airport, t)
+    return view.slot_taken(airport, t, exclude_event=exclude_event)
 
 
 def _gate_letter(airport: str) -> str:
@@ -151,9 +175,9 @@ class AirportWorld:
     def closure_at(self, t: int) -> bool:
         return _contains(self._closures, t)
 
-    def traffic_class(self, t: int) -> str:
-        """Seeded wake class of the movement at grid point t (WAKE-3); "Large" off the grid."""
-        return self._classes.get(t, "Large")
+    def traffic_class(self, t: int) -> str | None:
+        """Seeded wake class of the background movement at t (WAKE-3); None when t carries none."""
+        return self._classes.get(t) if self._traffic.get(t, False) else None
 
     def is_traffic(self, t: int) -> bool:
         return self._traffic.get(t, False)
@@ -162,13 +186,55 @@ class AirportWorld:
         """Grid points in [start, end) that carry background traffic."""
         return [p for p in self._grid if start <= p < end and self._traffic[p]]
 
-    def free_slots_after(self, t: int, n: int, view: LedgerView) -> list[int]:
-        """Up to n free grid points >= t, skipping rand(0..1) eligible points between slots."""
+    def _movements_near(self, t: int, view: LedgerView, exclude_event: str | None) -> dict[int, str]:
+        """Traffic and other events' held slots within the separation reach of t, by class."""
+        reach = separation_reach()
+        out: dict[int, str] = {}
+        for p in range(max(0, t - reach), min(config.MINUTES_PER_DAY, t + reach + 1)):
+            cls = self.traffic_class(p)
+            if cls is not None:
+                out[p] = cls
+            elif _slot_taken(view, self.airport, p, exclude_event):
+                out[p] = OTHER_EVENT_CLASS
+        return out
+
+    def is_separated(
+        self, t: int, own_class: str, view: LedgerView, exclude_event: str | None = None
+    ) -> tuple[bool, str]:
+        """Whether an arrival of `own_class` at t keeps the workbook wake minimum to the nearest
+        earlier and later movement (traffic or another event's held slot). Returns (ok, detail);
+        `exclude_event` leaves that event's own slots out (re-checks of a held package)."""
+        if not isinstance(own_class, str) or not own_class:
+            raise ValueError(f"own_class must be a non-empty wake class, got {own_class!r}")
+        near = self._movements_near(t, view, exclude_event)
+        earlier = [p for p in near if p <= t]
+        later = [p for p in near if p > t]
+        notes: list[str] = []
+        if earlier:
+            lead = max(earlier)
+            need = constraints.wake_minutes(near[lead], own_class)
+            if t - lead < need:
+                return False, f"{t - lead} min behind {near[lead]} at {lead}, need {need:.2f}"
+            notes.append(f"{t - lead} min behind {near[lead]} at {lead} (need {need:.2f})")
+        if later:
+            follow = min(later)
+            need = constraints.wake_minutes(own_class, near[follow])
+            if follow - t < need:
+                return False, f"{follow - t} min ahead of {near[follow]} at {follow}, need {need:.2f}"
+            notes.append(f"{follow - t} min ahead of {near[follow]} at {follow} (need {need:.2f})")
+        return True, "separated: " + ("; ".join(notes) or "no movement within reach")
+
+    def free_slots_after(
+        self, t: int, n: int, view: LedgerView, own_class: str = OTHER_EVENT_CLASS
+    ) -> list[int]:
+        """Up to n free, wake-separated grid points >= t for an arrival of `own_class`, skipping
+        rand(0..1) eligible points between returned slots (the seeded skip)."""
         if n <= 0:
             return []
         eligible = (
             p for p in self._grid
             if p >= t and not self._traffic[p] and not view.slot_taken(self.airport, p)
+            and self.is_separated(p, own_class, view)[0]
         )
         rng = config.seeded_rng(config.seed_key("slots", self.airport, self.date, t))
         slots: list[int] = []

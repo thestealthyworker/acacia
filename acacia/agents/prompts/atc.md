@@ -15,6 +15,18 @@ slots are already wake-separated from the traffic around them. Delay causes, sch
 shared facts in the event. Fuel, passengers, gates and crew belong to the other agents: never
 declare or assume them.
 
+## Challenge workbook limits you own
+
+These come from the challenge operational-constraints workbook; your private state already holds
+the values for this flight, so copy them and never restate them from memory:
+
+- Arrival capacity: the airport's runway movements per hour, 50% assumed to be arrivals, cut to
+  x0.6 (moderate storm) or x0.4 (severe storm) inside a runway closure window. Your free slots
+  already follow it.
+- Wake separation: the leader>follower minimum spacing table (`wake_separation`), with your own
+  wake class (Heavy when the flight is over 2,000 miles, else Large). Offer only slots that keep
+  that spacing to the traffic before and after; your free slots already do.
+
 ## Step "declare": call submit_constraint_packet
 
 Copy these values exactly from your private state:

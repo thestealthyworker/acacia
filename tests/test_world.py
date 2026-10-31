@@ -1,16 +1,17 @@
 """FABLE_ADDENDUM 4 / HANDOVER 18.2: the shared airport world (runway grid, gate pool, failures).
 
-Covers determinism, closure spacing, ledger-aware free slots and gate_free_from with a duration.
+Covers determinism, workbook arrival capacity and storm spacing (CONSTRAINTS.md 2), wake
+separation against traffic and held ledger slots, ledger-aware free slots and gate_free_from.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from acacia import config
+from acacia import config, constraints
 from acacia.models import EmptyLedgerView, Injected
 from acacia.timeutil import to_hhmm
-from acacia.world import AirportWorld, clear_world_cache, get_world
+from acacia.world import AirportWorld, clear_world_cache, get_world, separation_reach
 
 DATE = "2015-02-26"
 CLOSURE = Injected(type="RUNWAY_CLOSED", ref="rwy", start="12:00", end="13:00")
@@ -118,9 +119,12 @@ def test_traffic_wake_classes_are_seeded_and_near_the_mix() -> None:
     again = AirportWorld("ATL", DATE, [])
     grid = world.grid()
     assert [world.traffic_class(p) for p in grid] == [again.traffic_class(p) for p in grid]
-    share = {c: sum(world.traffic_class(p) == c for p in grid) / len(grid) for c in ("Heavy", "Large", "Small")}
+    traffic = world.traffic_times(0, config.MINUTES_PER_DAY)
+    assert all(world.traffic_class(p) in ("Heavy", "Large", "Small") for p in traffic)
+    share = {c: sum(world.traffic_class(p) == c for p in traffic) / len(traffic) for c in ("Heavy", "Large", "Small")}
     assert 0.11 < share["Heavy"] < 0.19 and 0.75 < share["Large"] < 0.85 and 0.02 < share["Small"] < 0.08
-    assert world.traffic_class(2) == "Large"  # not a grid point
+    assert world.traffic_class(2) is None  # not a grid point
+    assert all(world.traffic_class(p) is None for p in grid if not world.is_traffic(p))
 
 
 def test_closures_are_a_union_of_runway_closed_events() -> None:
@@ -154,7 +158,8 @@ def test_free_slots_skip_traffic_taken_and_earlier_points() -> None:
     again = world.free_slots_after(700, 4, taken)
     assert slots[0] not in again and len(again) == 4
     # the first eligible point is always returned; skips only happen between returned slots
-    eligible = [p for p in world.grid() if p >= 700 and not world.is_traffic(p) and p != slots[0]]
+    eligible = [p for p in world.grid() if p >= 700 and not world.is_traffic(p) and p != slots[0]
+                and world.is_separated(p, "Large", taken)[0]]
     assert again[0] == eligible[0]
 
 
@@ -165,11 +170,124 @@ def test_free_slots_after_end_of_day_is_empty() -> None:
     assert world.free_slots_after(0, 0, EmptyLedgerView()) == []
 
 
+# --- wake separation (CONSTRAINTS.md 2, WAKE-1..4, WAKE-7) ---------------------------------
+class _HeldView(EmptyLedgerView):
+    """A view with held runway slots per event id, honouring exclude_event."""
+
+    def __init__(self, held: dict[int, str]) -> None:
+        self.held = held
+
+    def slot_taken(self, airport: str, t: int, exclude_event: str | None = None) -> bool:
+        owner = self.held.get(t)
+        return owner is not None and owner != exclude_event
+
+
+def _isolated_point(world: AirportWorld, lo: int = 300) -> int:
+    """A free grid point >= lo with no traffic within the separation reach on either side."""
+    reach = separation_reach()
+    for p in world.grid():
+        if p < lo or world.is_traffic(p):
+            continue
+        if not world.traffic_times(p - reach, p + reach + 1):
+            return p
+    raise AssertionError("fixture world has no isolated free point")
+
+
+def test_separation_reach_covers_the_widest_workbook_pair() -> None:
+    assert separation_reach() == 4  # Super -> Small 8 nm = 3.43 min at 140 kt
+    assert all(constraints.wake_minutes(a, b) <= separation_reach()
+               for a in ("Super", "Heavy", "Large", "Small") for b in ("Heavy", "Large", "Small"))
+
+
+def test_is_separated_uses_workbook_minutes_against_held_slots() -> None:
+    world = AirportWorld("SFO", DATE, [])
+    t = _isolated_point(world)
+    ok, detail = world.is_separated(t, "Large", EmptyLedgerView())
+    assert ok and "separated" in detail
+    # another event's held slot counts as Large (WAKE-7): Large -> Large needs 3 nm = 1.29 min
+    assert not world.is_separated(t, "Large", _HeldView({t - 1: "EV-2"}))[0]
+    assert world.is_separated(t, "Large", _HeldView({t - 2: "EV-2"}))[0]
+    assert not world.is_separated(t, "Large", _HeldView({t + 1: "EV-2"}))[0]
+    assert world.is_separated(t, "Large", _HeldView({t + 2: "EV-2"}))[0]
+    # Large leader -> Small follower needs 4 nm = 1.71 min; Small -> Large only 3 nm
+    assert not world.is_separated(t, "Small", _HeldView({t - 1: "EV-2"}))[0]
+    assert world.is_separated(t, "Small", _HeldView({t - 2: "EV-2"}))[0]
+    # a held slot at t itself is 0 min apart
+    ok, detail = world.is_separated(t, "Large", _HeldView({t: "EV-2"}))
+    assert not ok and "need" in detail
+
+
+def test_is_separated_boundary_exactly_at_the_minimum_passes(monkeypatch) -> None:
+    world = AirportWorld("SFO", DATE, [])
+    t = _isolated_point(world)
+    monkeypatch.setattr(constraints, "wake_minutes", lambda leader, follower: 2.0)
+    assert world.is_separated(t, "Large", _HeldView({t - 2: "EV-2"}))[0]
+    assert world.is_separated(t, "Large", _HeldView({t + 2: "EV-2"}))[0]
+    assert not world.is_separated(t, "Large", _HeldView({t - 1: "EV-2"}))[0]
+    assert not world.is_separated(t, "Large", _HeldView({t + 1: "EV-2"}))[0]
+
+
+def test_is_separated_ignores_the_excluded_events_own_slots() -> None:
+    world = AirportWorld("SFO", DATE, [])
+    t = _isolated_point(world)
+    view = _HeldView({t - 1: "EV-1"})
+    assert not world.is_separated(t, "Large", view)[0]
+    assert world.is_separated(t, "Large", view, exclude_event="EV-1")[0]
+
+
+def test_is_separated_against_traffic_classes() -> None:
+    """Every traffic point is a neighbour with its own seeded class; a point right next to
+    traffic (1 min) is never separated, since the smallest minimum is 1.29 min."""
+    world = AirportWorld("ATL", DATE, [])
+    traffic = world.traffic_times(600, 700)
+    for p in traffic:
+        for own in ("Large", "Heavy"):
+            assert not world.is_separated(p + 1, own, EmptyLedgerView())[0]
+            assert not world.is_separated(p - 1, own, EmptyLedgerView())[0]
+    t = _isolated_point(world)
+    assert world.is_separated(t, "Heavy", EmptyLedgerView())[0]
+
+
+def _wake_ok(world: AirportWorld, slot: int, own: str, held: dict[int, str]) -> bool:
+    reach = separation_reach()
+    others = {p: world.traffic_class(p) for p in world.traffic_times(slot - reach, slot + reach + 1)}
+    others.update({p: "Large" for p in held if abs(p - slot) <= reach})
+    for p, cls in others.items():
+        if p <= slot and slot - p < constraints.wake_minutes(cls, own):
+            return False
+        if p > slot and p - slot < constraints.wake_minutes(own, cls):
+            return False
+    return True
+
+
+@pytest.mark.parametrize("own", ["Large", "Heavy"])
+def test_free_slots_never_violate_wake_against_traffic_or_held_slots(own: str) -> None:
+    world = AirportWorld("ATL", DATE, [CLOSURE])
+    plain = world.free_slots_after(700, 8, EmptyLedgerView(), own_class=own)
+    assert len(plain) == 8 and all(_wake_ok(world, s, own, {}) for s in plain)
+    held = {plain[0] + 1: "EV-9", plain[3]: "EV-9"}
+    view = _HeldView(held)
+    slots = world.free_slots_after(700, 8, view, own_class=own)
+    assert len(slots) == 8 and plain[0] not in slots and plain[3] not in slots
+    assert all(_wake_ok(world, s, own, held) for s in slots)
+    assert all(world.is_separated(s, own, view)[0] for s in slots)
+    assert all(not world.is_traffic(s) and not view.slot_taken("ATL", s) for s in slots)
+
+
+def test_free_slots_default_class_is_large_and_heavy_is_a_subset_of_separated_points() -> None:
+    world = AirportWorld("ATL", DATE, [])
+    assert world.free_slots_after(600, 4, EmptyLedgerView()) == world.free_slots_after(600, 4, EmptyLedgerView(), "Large")
+    heavy_ok = [p for p in world.grid() if 600 <= p < 700 and not world.is_traffic(p)
+                and world.is_separated(p, "Heavy", EmptyLedgerView())[0]]
+    assert heavy_ok and all(world.is_separated(p, "Large", EmptyLedgerView())[0] for p in heavy_ok)
+
+
 # --- gate pool ---------------------------------------------------------------------------------
 def test_gate_pool_naming_and_busy_intervals() -> None:
     atl = AirportWorld("ATL", DATE, [])
     dca = AirportWorld("DCA", DATE, [])
-    assert len(atl.gates()) == 8 and len(set(atl.gates())) == 8
+    assert len(atl.gates()) == constraints.WORLD_GATE_POOL == 8  # CAP-4
+    assert len(set(atl.gates())) == constraints.WORLD_GATE_POOL
     assert all(g.startswith("A") for g in atl.gates()) and all(g.startswith("D") for g in dca.gates())
     numbers = [int(g[1:]) for g in atl.gates()]
     assert numbers == sorted(numbers) and all(1 <= n <= 30 for n in numbers)

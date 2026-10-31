@@ -5,14 +5,15 @@ Red lines are private (never declared): Pilot rejects when connections are fully
 overtime max(0, slot + Ti + min_turn - shift_end) exceeds 20 min (PLAN 3.4).
 Hard limits follow CONSTRAINTS.md: A_H2 WAKE_SEPARATION, P_H2 FLIGHT_CREW_DUTY_END (when the
 duty end falls inside the day) and G_H3 GATE_CHANGE_NOTICE, with the same values the LLM
-agents declare (acacia.agents.declared).
+agents declare (acacia.agents.declared). Pilot also states the facts `eta` and `burn_kg_per_h`
+(the solver's fuel span and holding-fuel report); Ground states `spare_gates` and `shift_start`.
 """
 
 from __future__ import annotations
 
 from acacia.agents.base import AgentPrivate, coerce_private
 from acacia.agents.declared import crew_duty_hhmm, decision_time_min, gate_notice_value, wake_value
-from acacia.constraints import GATE_CHANGE_NOTICE_MIN
+from acacia.constraints import GATE_CHANGE_NOTICE_MIN, burn_kg_per_h
 from acacia.models import (
     AgentRole, AtcPrivate, ConstraintPacket, Decision, DisruptionEvent, GroundPrivate, HardLimit,
     Option, PilotPrivate, ReasonCode, ResolutionPackage, SoftPref, Verdict,
@@ -99,7 +100,8 @@ class RulePilot:
                   SoftPref(id="P_S2", preference="Maximise fuel margin at landing", weight=0.3,
                            metric="fuel_margin", target=event.eta_landing)],
             options=[],
-            facts_owned={"fuel_endurance_until": to_hhmm(p.land_by), "connecting_pax": p.pax},
+            facts_owned={"fuel_endurance_until": to_hhmm(p.land_by), "connecting_pax": p.pax,
+                         "eta": event.eta_landing, "burn_kg_per_h": pilot_burn(p)},
         )
 
     def decide(self, event: DisruptionEvent, package: ResolutionPackage,
@@ -120,6 +122,19 @@ class RulePilot:
                            f"(need {to_hhmm(p.connect_by)}).")
         status = "protected" if gate_arr <= p.connect_by else "partly at risk"
         return _accept(base, f"Fuel margin {p.land_by - slot} min; connections {status}.")
+
+
+def pilot_burn(p: PilotPrivate) -> int:
+    """Holding burn kg/h (FUEL-4): the private value, else the workbook rate for the wake class."""
+    return p.burn_kg_per_h if p.burn_kg_per_h is not None else burn_kg_per_h(p.wake_class)
+
+
+def _ground_facts(g: GroundPrivate) -> dict:
+    facts: dict = {"min_turn_min": g.min_turn, "next_leg_departure": to_hhmm(g.next_departure),
+                   "spare_gates": g.spare_gates}
+    if g.shift_start is not None:
+        facts["shift_start"] = to_hhmm(g.shift_start)
+    return facts
 
 
 def _pilot_hard(p: PilotPrivate) -> list[HardLimit]:
@@ -149,7 +164,7 @@ class RuleGround:
                   SoftPref(id="G_S2", weight=0.4, metric="keep_gate", target=g.assigned_gate,
                            preference=f"Keep assigned gate {g.assigned_gate}")],
             options=[Option(type="GATE", value=x) for x in usable],
-            facts_owned={"min_turn_min": g.min_turn, "next_leg_departure": to_hhmm(g.next_departure)},
+            facts_owned=_ground_facts(g),
         )
 
     def decide(self, event: DisruptionEvent, package: ResolutionPackage,

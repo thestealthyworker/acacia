@@ -122,7 +122,7 @@ def test_overtime_lowers_turnaround() -> None:
     p = packets(ground=ground({"A12": 700}, duty=900, shift_end=780))
     r = solve(p, TI, [], set())
     c = next(c for c in r.all if c.package.slot == "12:52")  # done 817, overtime 37
-    assert abs(c.utilities["G_S1"] - (1 - 37 / 60)) < 1e-9
+    assert abs(c.utilities["G_S1"] - (1 - 1.5 * 37 / 60)) < 1e-9  # overtime costs 1.5x (CREW-2)
 
 
 # --- steps 5 and 6: cuts and tried -----------------------------------------------------------
@@ -339,3 +339,60 @@ def test_fuel_utility_spans_land_by_minus_declared_eta() -> None:
     assert _cand(r, 772, "A12").utilities["P_S2"] == 0.6
     plain = solve(packets(), TI, [], set())
     assert plain.all and _cand(plain, 772, "A12").utilities["P_S2"] == 0.4
+
+
+# --- CONSTRAINTS.md 4-5: fuel span, overtime cost, informational keys, G_H3 cut ------------------
+def _with_facts(packet: ConstraintPacket, **facts) -> ConstraintPacket:
+    return packet.model_copy(update={"facts_owned": {**packet.facts_owned, **facts}})
+
+
+def test_crew_utility_is_one_minus_1_5_overtime_over_60_and_floors_at_zero() -> None:
+    p = packets(ground=ground({"A12": 700}, duty=900, shift_end=742))  # 740+10+35 = 785: 43 min over
+    r = solve(p, TI, [], set())
+    assert _cand(r, 740, "A12").utilities["G_S1"] == 0.0  # 1 - 1.5*43/60 < 0
+    p2 = packets(ground=ground({"A12": 700}, duty=900, shift_end=785))
+    assert solve(p2, TI, [], set()).all and _cand(solve(p2, TI, [], set()), 740, "A12").utilities["G_S1"] == 1.0
+
+
+def test_fuel_span_uses_pilot_declared_eta_fact() -> None:
+    pil = _with_facts(pilot(790, 760), eta=to_hhmm(760))  # no P_S2 target: the fact gives E
+    r = solve(packets(pilot=pil), TI, [], set())
+    assert _cand(r, 772, "A12").utilities["P_S2"] == 0.6  # (790-772)/(790-760)
+
+
+def test_informational_keys_are_reported_but_not_scored() -> None:
+    pil = _with_facts(pilot(790, 760), eta=to_hhmm(730), burn_kg_per_h=2400)
+    p = packets(pilot=pil, ground=ground({"A12": 700}, duty=900, shift_end=780))
+    c = _cand(solve(p, TI, [], set()), 772, "A12")
+    bd = c.package.score_breakdown
+    assert bd["holding_fuel_kg"] == 1680.0      # (772 - 730) min x 2400 kg/h / 60
+    assert bd["overtime_cost_min"] == 55.5      # 1.5 x (772+10+35 - 780 = 37)
+    weighted = sum(bd[k] for k in POLICY)
+    assert abs(c.package.score - weighted) < 1e-9
+    assert set(bd) == set(POLICY) | {"holding_fuel_kg", "overtime_cost_min"}
+
+
+def test_holding_fuel_omitted_without_declared_burn() -> None:
+    c = _cand(solve(packets(), TI, [], set()), 760, "A12")  # done 805 <= shift end 816
+    assert "holding_fuel_kg" not in c.package.score_breakdown
+    assert c.package.score_breakdown["overtime_cost_min"] == 0.0
+
+
+def test_gate_change_notice_cite_cuts_that_gate() -> None:
+    p = packets()
+    top = solve(p, TI, [], set()).top
+    rej = _reject(AgentRole.GROUND, ReasonCode.GATE_CHANGE_NOTICE, "G_H3", top.package_id)
+    g = p[AgentRole.GROUND]
+    p[AgentRole.GROUND] = g.model_copy(update={"hard": [*g.hard, HardLimit(
+        id="G_H3", rule="GATE_CHANGE_NOTICE",
+        value={"min_notice_min": 20, "decision_time": "12:00", "assigned_gate": "A7"})]})
+    cut = cut_from_reject(rej, top, p, TI)
+    assert cut is not None and cut.kind == "GATE" and cut.gate == top.gate
+    again = solve(p, TI, [cut], set())
+    assert all(c.status != "FEASIBLE" for c in again.all if c.package.gate == top.gate)
+
+
+def test_slot_exactly_at_land_by_is_feasible() -> None:
+    r = solve(packets(pilot=pilot(760, 760)), TI, [], set())
+    assert ReasonCode.FUEL_LIMIT not in _cand(r, 760, "A12").discard
+    assert ReasonCode.FUEL_LIMIT in _cand(r, 772, "A12").discard

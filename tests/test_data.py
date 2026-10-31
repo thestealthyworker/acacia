@@ -131,9 +131,8 @@ def test_normalise_flight_no() -> None:
         normalise_flight_no("DL", "AA12")
 
 
-def test_min_turn_and_seed_helper() -> None:
-    assert config.min_turn(2001) == 60 and config.min_turn(2000) == 45
-    assert config.min_turn(1001) == 45 and config.min_turn(1000) == 35
+def test_distance_min_turn_is_gone_and_seed_helper() -> None:
+    assert not hasattr(config, "min_turn")  # CAP-6: constraints.min_turnaround(airport) replaces it
     a = config.seeded_rng(config.seed_key("x")).random()
     assert a == config.seeded_rng(config.seed_key("x")).random()
     with pytest.raises(ValueError):

@@ -254,4 +254,12 @@ REGISTRY: tuple[ConstraintItem, ...] = (
     ConstraintItem("KIT-1", "kit", "Private agent state", "not given",
                    "slots, pax, gates, crew shift simulated with a fixed seed", "ASSUMED", "labelled simulated"),
     ConstraintItem("KIT-2", "kit", "Minimum connection time", "not given", "35 min", "ASSUMED"),
+    ConstraintItem("FUEL-6", "fuel_and_crew", "Holding fuel on a divert", "not stated",
+                   "not modelled: the aircraft diverts at once, holding_fuel_kg shown as none", "ASSUMED"),
+    ConstraintItem("KIT-3", "kit", "Fallback gate choice", "kit: earliest free gate",
+                   "assigned gate first, then earliest free gate, then a remote stand", "CHANGED",
+                   "keeping the assigned gate needs no 20 min gate-change notice"),
+    ConstraintItem("KIT-4", "kit", "Ground timeout default", "kit: every gate unavailable except REMOTE-1",
+                   "as kit; REMOTE-1 counts as a gate change needing 20 min notice; workbook turnaround",
+                   "ASSUMED", "most restrictive reading"),
 )

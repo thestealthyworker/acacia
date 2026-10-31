@@ -4,7 +4,8 @@ Accepted shapes (detected by keys, extra keys ignored):
   row_ref   {"flight": {"airline", "flight_number"|"flight_no", "date", "origin"?, "dest"?}}
             or {"flight": "DL1639", "date": "2015-02-26"}
   raw row   {"row": {31 CSV fields}} or the 31 CSV fields at the top level
-  explicit  any of the above plus "injected", "overrides", "declared_emergency", "stress"
+  explicit  any of the above plus "injected", "overrides", "declared_emergency", "stress",
+            "decision_time" ("HH:MM", CONSTRAINTS.md 3; recorded in overrides)
   event     {"event": {full DisruptionEvent}}
   batch     {"triggers": [...]} or a list (to_events / to_triggers only)
   scan      {"source": "scan", "airport", "date", "window_min", "start"?} (to_events / to_triggers)
@@ -22,7 +23,7 @@ from acacia import config
 from acacia.data import FLIGHT_COLUMNS, DataStore, earliest_landing, in_window, num, qualifies_base
 from acacia.models import DisruptionEvent, Injected, Stress
 from acacia.timeutil import to_hhmm, to_min
-from acacia.triangulate import triangulate
+from acacia.triangulate import default_decision_time, triangulate
 
 _FLIGHT_CODE_RE = re.compile(r"^([A-Z0-9]{2})(\d{1,5})$")
 _LOCKED_FIELDS = {"event_id", "flight"}
@@ -192,10 +193,17 @@ def _apply_overrides(event: DisruptionEvent, payload: Mapping[str, Any]) -> Disr
     if payload.get("injected"):
         merged["injected"] = [Injected.model_validate(i).model_dump() for i in payload["injected"]]
         recorded.append("injected")
+    if payload.get("decision_time"):
+        merged["decision_time"] = payload["decision_time"]
+        recorded.append("decision_time")
     if payload.get("declared_emergency"):
         recorded.append("declared_emergency")
     merged["overrides"] = list(dict.fromkeys(recorded))
-    return DisruptionEvent.model_validate(merged)
+    event = DisruptionEvent.model_validate(merged)
+    if "decision_time" in event.overrides:
+        return event
+    # CONSTRAINTS.md 3: the default follows the final injected list and E (GATE-1)
+    return event.model_copy(update={"decision_time": default_decision_time(event)})
 
 
 def _check_qualifies(row: Mapping[str, Any] | None, event: DisruptionEvent, has_injected: bool) -> None:

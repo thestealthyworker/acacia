@@ -361,6 +361,8 @@ class PilotPrivate(BaseModel):
     connect_by: int
     low_fuel: bool = False
     crew_duty_end: int | None = None  # ADDED: CONSTRAINTS.md 4 flight-crew 13 h duty end (P_H2)
+    wake_class: str = "Large"  # ADDED: CONSTRAINTS.md 4 widebody (Heavy) or narrowbody burn
+    burn_kg_per_h: int | None = None  # ADDED: CONSTRAINTS.md 4 holding fuel burn (FUEL-4)
 
 
 class GroundPrivate(BaseModel):
@@ -372,6 +374,8 @@ class GroundPrivate(BaseModel):
     shift_end: int
     duty_limit: int
     next_departure: int
+    shift_start: int | None = None  # ADDED: CONSTRAINTS.md 5, shift_end - 8 h (shown only)
+    spare_gates: int = 0  # ADDED: CONSTRAINTS.md 3, workbook spare gates at this airport
 
 
 class PrivateState(BaseModel):

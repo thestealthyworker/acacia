@@ -98,11 +98,14 @@ def private_view(role: AgentRole, private: AgentPrivate | dict, event: Disruptio
     if isinstance(p, PilotPrivate):
         return {"land_by": to_hhmm(p.land_by), "connecting_pax": p.pax,
                 "connect_by": to_hhmm(p.connect_by), "low_fuel": p.low_fuel,
-                "crew_duty_end": crew_duty_hhmm(p)}
+                "crew_duty_end": crew_duty_hhmm(p), "wake_class": p.wake_class,
+                "burn_kg_per_h": p.burn_kg_per_h}
     view = {"gates": list(p.gates), "assigned_gate": p.assigned_gate,
             "gate_free_from": _gate_free_map(p), "failed_gates": list(p.failed),
             "min_turn_min": p.min_turn, "shift_end": to_hhmm(p.shift_end),
-            "duty_limit": to_hhmm(p.duty_limit), "next_departure": to_hhmm(p.next_departure)}
+            "duty_limit": to_hhmm(p.duty_limit), "next_departure": to_hhmm(p.next_departure),
+            "spare_gates": p.spare_gates,
+            "shift_start": to_hhmm(p.shift_start) if p.shift_start is not None else None}
     if event is not None:
         view["gate_change_notice"] = gate_notice_value(event, p)
     return view
@@ -176,15 +179,17 @@ def recording_path(root: Path | str, event_id: str, role: AgentRole, step: Step,
 # --- declaration audit ---------------------------------------------------------------------------
 def expected_declaration(role: AgentRole, private: AgentPrivate | dict,
                          event: DisruptionEvent | None = None) -> list[tuple[str, str, str, Any]]:
-    """(kind, id, rule, value) the solver and checker rely on (CONSTRAINTS.md 2-3); G_H3 needs the event."""
+    """(kind, id, rule, value) the solver and checker rely on (CONSTRAINTS.md 2-4); G_H3 and the
+    Pilot's `eta` fact (fuel-utility span) need the event."""
     p = coerce_private(role, private)
     if isinstance(p, AtcPrivate):
         return [("hard", "A_H1", "SLOT_IN_SEQUENCE", [to_hhmm(s) for s in sorted(p.free_slots)]),
                 ("hard", "A_H2", "WAKE_SEPARATION", wake_value(p.own_class))]
     if isinstance(p, PilotPrivate):
         duty = crew_duty_hhmm(p)
+        eta = [("fact", "eta", "facts_owned", event.eta_landing)] if event is not None else []
         return [("hard", "P_H1", "LAND_BY", to_hhmm(p.land_by))] + (
-            [("hard", "P_H2", "FLIGHT_CREW_DUTY_END", duty)] if duty else [])
+            [("hard", "P_H2", "FLIGHT_CREW_DUTY_END", duty)] if duty else []) + eta
     out = [("hard", "G_H1", "GATE_FREE_FROM", _gate_free_map(p)),
            ("hard", "G_H2", "CREW_DUTY_LIMIT", to_hhmm(p.duty_limit))]
     if event is not None:

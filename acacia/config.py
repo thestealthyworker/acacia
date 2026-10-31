@@ -65,7 +65,7 @@ HUBS: tuple[str, ...] = (
 
 # --- thresholds ----------------------------------------------------------------------------
 MAX_TURNS = 3
-MIN_SEPARATION = 3            # minutes between runway movements
+MIN_SEPARATION = 3            # LEGACY kit value; the workbook wake table (constraints) replaces it
 MCT = 35                      # minimum connection time, minutes
 WEATHER_THRESHOLD = 15        # WEATHER_DELAY > 15 qualifies
 LATE_AIRCRAFT_THRESHOLD = 20  # LATE_AIRCRAFT_DELAY > 20 qualifies
@@ -96,12 +96,3 @@ def seeded_rng(key: str) -> random.Random:
     if not isinstance(key, str) or not key.startswith(SEED_SALT):
         raise ValueError(f"seed key must start with SEED_SALT {SEED_SALT!r}: {key!r}")
     return random.Random(int(hashlib.sha256(key.encode()).hexdigest()[:16], 16))
-
-
-def min_turn(distance: int | float) -> int:
-    """Minimum turnaround in minutes: 60 if distance > 2000, 45 if > 1000, else 35."""
-    if distance > 2000:
-        return 60
-    if distance > 1000:
-        return 45
-    return 35
